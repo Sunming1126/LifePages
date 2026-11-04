@@ -5,3 +5,9 @@
 开发约定见 AGENTS.md。当前实现是本地单用户预览，录音和 SQLite 保存在 data/，不随 Git 上传。AI通过环境变量 `OPENAI_API_KEY`、`OPENAI_BASE_URL`（默认 https://api.openai.com/v1）、`CHAT_MODEL`（默认 gpt-4o-mini）和 `TRANSCRIBE_MODEL`（默认 whisper-1）配置兼容接口；使用前自行确认提供商支持音频转写。没有密钥时可手动录入文字，AI生成不可用。打印PDF使用浏览器打印功能。
 
 二维码默认指向 localhost，只能在运行本机打开；手机扫码需部署到可访问的 HTTPS 服务，并配置 BASE_URL。当前没有身份认证、加密存储及公网权限控制，禁止公网使用。后续需实现身份、授权、跨设备播放及安全存储。
+
+## 2026-11-04 模型配置
+
+当前本机使用火山方舟 Coding 接口 `deepseek-v4.1-flash`。本机密钥保存在 Git 忽略的 `.env`，由用户提供的仓库外 api_key.txt 配置生成；其他电脑须自行配置，不得把密钥提交 Git。参考 `.env.example`。用户模型支持约 1M token 上下文；当前调用仅使用当前故事转写，为避免超限，输入超出 900,000 UTF-8 字节时明确提示拆分（保守上限，不是精确 token 计数），不会静默截断。输出预留 4096 token。不要声称代码已经跨故事使用完整 1M 上下文。
+
+该模型不能作为语音转写服务。转写需要独立配置 `TRANSCRIBE_BASE_URL`、`TRANSCRIBE_API_KEY` 和 `TRANSCRIBE_MODEL`，没有配置时可手工输入文字。AI真实接口已用非个人测试数据验证。

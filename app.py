@@ -7,6 +7,13 @@ from pydantic import BaseModel
 import httpx, qrcode
 
 ROOT = Path(__file__).resolve().parent
+# Local configuration stays outside version control; explicit environment values win.
+local_config = ROOT / '.env'
+if local_config.exists():
+    for line in local_config.read_text(encoding='utf-8-sig').splitlines():
+        if line.strip() and not line.lstrip().startswith('#') and '=' in line:
+            key, value = line.split('=', 1)
+            os.environ.setdefault(key.strip(), value.strip())
 DATA = ROOT / 'data'; AUDIO = DATA / 'audio'; AUDIO.mkdir(parents=True, exist_ok=True)
 app = FastAPI(title='LifePages')
 app.mount('/static', StaticFiles(directory=ROOT / 'static'), name='static')
@@ -36,7 +43,7 @@ def index(): return FileResponse(ROOT / 'static' / 'index.html')
 def listen(story_id: int):
     need_story(story_id); return FileResponse(ROOT / 'static' / 'listen.html')
 @app.get('/api/config')
-def config(): return {'ai': bool(os.getenv('OPENAI_API_KEY')), 'base_url': os.getenv('BASE_URL', 'http://127.0.0.1:8000')}
+def config(): return {'ai': bool(os.getenv('OPENAI_API_KEY')), 'transcription': bool(os.getenv('TRANSCRIBE_API_KEY') and os.getenv('TRANSCRIBE_BASE_URL')), 'base_url': os.getenv('BASE_URL', 'http://127.0.0.1:8000')}
 @app.get('/api/projects')
 def projects(): return rows('SELECT * FROM project ORDER BY id DESC')
 @app.post('/api/projects')
@@ -93,7 +100,9 @@ def api_config():
 async def transcribe(rid: int):
     r=rows('SELECT filename FROM recordings WHERE id=?',(rid,))
     if not r: raise HTTPException(404,'录音不存在')
-    base,headers=api_config(); path=AUDIO/r[0]['filename']
+    stt_key=os.getenv('TRANSCRIBE_API_KEY'); base=os.getenv('TRANSCRIBE_BASE_URL', '').rstrip('/')
+    if not stt_key or not base: raise HTTPException(400,'????????????????????')
+    headers={'Authorization':'Bearer '+stt_key}; path=AUDIO/r[0]['filename']
     try:
         async with httpx.AsyncClient(timeout=120) as client:
             with path.open('rb') as f: response=await client.post(base+'/audio/transcriptions',headers=headers,files={'file':(path.name,f,{'.mp4':'audio/mp4','.ogg':'audio/ogg'}.get(path.suffix,'audio/webm'))},data={'model':os.getenv('TRANSCRIBE_MODEL','whisper-1')})
@@ -107,10 +116,13 @@ async def ai(req: AIRequest):
     if not text: raise HTTPException(400,'请先填写或转写至少一段回答')
     if req.mode not in ('followup','draft'): raise HTTPException(400,'无效模式')
     prompt=('你是一位温柔的口述史访谈员。根据回答只提出一个具体而自然的追问，不假设未说过的事实。只输出问题。' if req.mode=='followup' else '根据口述整理成第一人称回忆录片段，保留说话者的表达，不编造事实、心理或对话，缺失信息不补写。只输出正文。')
+    # UTF-8 byte count is a conservative upper bound for the token budget.
+    if len(text.encode('utf-8')) > 900000:
+        raise HTTPException(400,'??????????????????????')
     base,headers=api_config()
     try:
         async with httpx.AsyncClient(timeout=120) as client:
-            response=await client.post(base+'/chat/completions',headers=headers,json={'model':os.getenv('CHAT_MODEL','gpt-4o-mini'),'messages':[{'role':'system','content':prompt},{'role':'user','content':text}]})
+            response=await client.post(base+'/chat/completions',headers=headers,json={'model':os.getenv('CHAT_MODEL','deepseek-v4.1-flash'),'max_tokens':4096,'messages':[{'role':'system','content':prompt},{'role':'user','content':text}]})
         response.raise_for_status(); return {'text':response.json()['choices'][0]['message']['content']}
     except Exception: raise HTTPException(502,'AI服务调用失败，请检查服务地址、模型和密钥')
 @app.get('/api/stories/{sid}/qr')
