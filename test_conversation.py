@@ -47,6 +47,32 @@ class ConversationTest(unittest.TestCase):
             self.assertEqual(client.post(f'/api/stories/{sid}/conversation/next').status_code, 400)
         self.assertEqual(client.get(f'/api/stories/{sid}').json()['messages'][0]['content'], 'A memory')
 
+    def test_followup_uses_full_conversation_and_person_centered_prompt(self):
+        client = self.client
+        pid = client.post('/api/projects', json={'name': 'Test', 'background': 'A teacher'}).json()['id']
+        sid = client.post('/api/stories', json={'project_id': pid, 'title': 'Story'}).json()['id']
+        client.post(f'/api/stories/{sid}/messages', json={'content': 'Teaching was important to me.'})
+        captured = {}
+
+        class Response:
+            def raise_for_status(self): pass
+            def json(self): return {'choices': [{'message': {'content': 'What did teaching mean to you?'}}]}
+
+        class FakeClient:
+            def __init__(self, **kwargs): pass
+            async def __aenter__(self): return self
+            async def __aexit__(self, *args): pass
+            async def post(self, url, **kwargs):
+                captured.update(kwargs['json'])
+                return Response()
+
+        with patch.object(app, 'api_config', return_value=('https://example.test', {})), patch.object(app.httpx, 'AsyncClient', FakeClient):
+            self.assertEqual(client.post(f'/api/stories/{sid}/conversation/next').status_code, 200)
+        self.assertIn('性格', captured['messages'][0]['content'])
+        self.assertIn('避免围绕同一事件', captured['messages'][0]['content'])
+        self.assertIn('Teaching was important to me.', captured['messages'][1]['content'])
+        self.assertEqual(client.get(f'/api/stories/{sid}').json()['messages'][-1]['role'], 'assistant')
+
 
 if __name__ == '__main__':
     unittest.main()
