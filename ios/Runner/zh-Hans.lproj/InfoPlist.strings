@@ -1,0 +1,3 @@
+"NSCameraUsageDescription" = "LifePages 的语音播报组件包含相机接口。当前版本的录音、相册选图和语音播报均无需拍摄。";
+"NSMicrophoneUsageDescription" = "LifePages 在您主动录音时使用麦克风，将讲述转成文字，并在发送后保留原声供回忆录播放。";
+"NSPhotoLibraryUsageDescription" = "LifePages 使用您从相册选中的照片，用于插入回忆录或设置个人头像。";

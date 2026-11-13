@@ -1,0 +1,11 @@
+[Unit]
+Description=Process LifePages new and historical chat memory in batches
+
+[Timer]
+OnActiveSec=30s
+OnUnitInactiveSec=2min
+AccuracySec=15s
+Unit=lifepages-memory.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,28 @@
+[Unit]
+Description=LifePages RTC reply playback
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=lifepages
+Group=lifepages
+Environment=PYTHONDONTWRITEBYTECODE=1
+EnvironmentFile=/opt/lifepages/rtc/rtc.env
+WorkingDirectory=/opt/lifepages/rtc/current
+ExecStart=/opt/lifepages/shared/venv/bin/python -m uvicorn server.rtc_playback:app --host 127.0.0.1 --port 8045 --no-access-log --limit-concurrency 160
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=20
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+UMask=0077
+CPUQuota=25%
+MemoryMax=192M
+TasksMax=48
+Nice=5
+
+[Install]
+WantedBy=multi-user.target

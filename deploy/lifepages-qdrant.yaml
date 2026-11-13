@@ -1,0 +1,5 @@
+service:
+  grpc_port: null
+  max_workers: 2
+  enable_cors: false
+  enable_snapshot_url_recovery: false

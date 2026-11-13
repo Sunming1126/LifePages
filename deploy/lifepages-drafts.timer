@@ -1,0 +1,12 @@
+[Unit]
+Description=Generate LifePages memoir drafts daily at 03:00 Asia/Shanghai
+
+[Timer]
+# 19:00 UTC is 03:00 the next day in Asia/Shanghai (UTC+8).
+OnCalendar=*-*-* 19:00:00 UTC
+Persistent=true
+AccuracySec=1min
+Unit=lifepages-drafts.service
+
+[Install]
+WantedBy=timers.target

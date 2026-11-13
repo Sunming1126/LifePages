@@ -1,0 +1,36 @@
+name: life_pages
+description: 私人的口述回忆录
+publish_to: none
+version: 0.1.0+3
+environment:
+  sdk: ^3.11.5
+dependencies:
+  flutter:
+    sdk: flutter
+  flutter_localizations:
+    sdk: flutter
+  crypto: ^3.0.7
+  http: ^1.6.0
+  record: ^6.2.0
+  path_provider: ^2.1.5
+  flutter_secure_storage: ^10.3.1
+  firebase_core: ^3.15.2
+  firebase_auth: ^5.7.0
+  google_sign_in: ^6.3.0
+  audioplayers: ^6.7.1
+  qr: ^3.0.2
+  liquid_glass_widgets: ^0.24.4
+  uuid: ^4.5.3
+  volc_engine_rtc: 3.60.8
+  url_launcher: ^6.3.2
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+flutter:
+  config:
+    enable-swift-package-manager: false
+  uses-material-design: true
+  assets:
+    - assets/memoir-cover.jpg
+    - assets/images/google_g_logo.png

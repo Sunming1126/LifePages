@@ -1,0 +1,29 @@
+[Unit]
+Description=LifePages private local embeddings
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=lifepages
+Group=lifepages
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=HF_HUB_OFFLINE=1
+Environment=HF_HUB_DISABLE_TELEMETRY=1
+Environment=OMP_NUM_THREADS=2
+Environment=LIFEPAGES_EMBEDDING_CACHE=/opt/lifepages/shared/embedding-cache
+WorkingDirectory=/opt/lifepages/current
+ExecStart=/opt/lifepages/shared/embedding-venv/bin/python -m uvicorn server.memory_embedding:app --host 127.0.0.1 --port 8042 --no-access-log
+Restart=on-failure
+RestartSec=10s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/opt/lifepages/shared/embedding-cache
+MemoryHigh=320M
+MemoryMax=432M
+CPUQuota=100%
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

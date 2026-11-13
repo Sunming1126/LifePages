@@ -1,0 +1,3 @@
+"NSCameraUsageDescription" = "LifePages includes camera interfaces in its real-time audio SDK. Recording, selecting photos and playing narration in this version do not require the camera.";
+"NSMicrophoneUsageDescription" = "LifePages uses the microphone when you record a story, to transcribe it and preserve your original voice after you send it.";
+"NSPhotoLibraryUsageDescription" = "LifePages uses the photos you select to illustrate your memoir or set your profile picture.";

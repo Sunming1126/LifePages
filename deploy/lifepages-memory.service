@@ -1,0 +1,20 @@
+[Unit]
+Description=LifePages long-term memory backfill and indexing
+After=network-online.target lifepages.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=lifepages
+Group=lifepages
+EnvironmentFile=/opt/lifepages/shared/lifepages.env
+Environment=PYTHONDONTWRITEBYTECODE=1
+WorkingDirectory=/opt/lifepages/current
+ExecStart=/opt/lifepages/shared/venv/bin/python -m server.memory_worker
+TimeoutStartSec=0
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/opt/lifepages/shared/data
+UMask=0077
