@@ -1,4 +1,5 @@
 import 'book_cover.dart';
+import 'platform_capabilities.dart';
 import 'chat_sheet.dart';
 import 'chapter_editor.dart';
 import 'reading_preferences.dart';
@@ -1902,7 +1903,7 @@ class _BookPageState extends State<BookPage> {
                 : _editChapter,
             icon: const Icon(Icons.edit_outlined),
           ),
-        if (widget.bookId != null)
+        if (widget.bookId != null && supportsNativeBookExport)
           TextButton(
             onPressed: loading || busy || loadError != null || chapters.isEmpty
                 ? null
@@ -1930,7 +1931,7 @@ class _BookPageState extends State<BookPage> {
               ),
             ),
     ),
-    bottomNavigationBar: !chapters.any(_hasBody)
+    bottomNavigationBar: !supportsNativeBookExport || !chapters.any(_hasBody)
         ? null
         : SafeArea(
             top: false,
@@ -2080,7 +2081,7 @@ class _BookPageState extends State<BookPage> {
               ),
             );
           }),
-          if (chapters.any(_hasAudio)) ...[
+          if (supportsNativeBookExport && chapters.any(_hasAudio)) ...[
             const SizedBox(height: 20),
             const Text(
               '点「成书」可将各章录音加入 PDF 的原声二维码。',

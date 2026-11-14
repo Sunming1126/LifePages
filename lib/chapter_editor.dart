@@ -10,6 +10,7 @@ import 'package:record/record.dart';
 import 'package:uuid/uuid.dart';
 
 import 'chat_sheet.dart';
+import 'platform_capabilities.dart';
 import 'main.dart'
     show
         Api,
@@ -1261,14 +1262,16 @@ class _ChapterEditorState extends State<ChapterEditor>
                     ),
                   ),
                 ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: _action(
-                    Icons.add_photo_alternate_outlined,
-                    '插入图片',
-                    enabled ? _pickPhoto : null,
+                if (supportsNativePhotos) ...[
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: _action(
+                      Icons.add_photo_alternate_outlined,
+                      '插入图片',
+                      enabled ? _pickPhoto : null,
+                    ),
                   ),
-                ),
+                ],
               ],
             ),
           ],

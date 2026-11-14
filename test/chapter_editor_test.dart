@@ -215,6 +215,7 @@ void main() {
           expect(find.text('您最想从这段经历的哪一幕说起？'), findsOneWidget);
         }
       },
+      variant: TargetPlatformVariant.only(TargetPlatform.iOS),
     );
   }
 
@@ -345,5 +346,6 @@ void main() {
       expect((exported['blocks'] as List).first['image'], base64Encode(sample));
       expect((exported['blocks'] as List).last['text'], '更口语的正文。');
     },
+    variant: TargetPlatformVariant.only(TargetPlatform.iOS),
   );
 }

@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../chat_sheet.dart';
+import '../platform_capabilities.dart';
 import '../main.dart' show Api, errorText;
 
 class AccountProfile {
@@ -140,10 +141,11 @@ class _ProfileEditorState extends State<ProfileEditor> {
         Wrap(
           alignment: WrapAlignment.center,
           children: [
-            TextButton(
-              onPressed: _busy ? null : _pick,
-              child: const Text('选择头像'),
-            ),
+            if (supportsNativePhotos)
+              TextButton(
+                onPressed: _busy ? null : _pick,
+                child: const Text('选择头像'),
+              ),
             if (_image != null)
               TextButton(
                 onPressed: _busy

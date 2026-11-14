@@ -206,7 +206,7 @@ void main() {
     await tester.tap(find.text('创建书籍'));
     await tester.pumpAndSettle();
     expect(submitted?['template_id'], 'family');
-  });
+  }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
 
   testWidgets('book preview shows raw stories and opens the finished PDF', (
     tester,
@@ -275,7 +275,7 @@ void main() {
       'https://test/listen/exported',
       '',
     ]);
-  });
+  }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
 
   testWidgets('shelf creates, switches, trashes and restores books', (
     tester,
@@ -368,7 +368,7 @@ void main() {
     await tester.tap(find.text('恢复'));
     await settleShelf(tester);
     expect(find.text('0/26 章 · 0 字'), findsNWidgets(2));
-  });
+  }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
 
   testWidgets(
     'cold entry opens immediately and reentry shows cached text while offline',
@@ -430,9 +430,11 @@ void main() {
       delayed.complete();
       await settleShelf(tester);
       expect(find.text('刚刚写下的新内容。'), findsOneWidget);
+      // Leaving awaits the local draft write before Windows removes its file.
+      await tester.pageBack();
+      await settleShelf(tester);
       await tester.pumpWidget(const SizedBox.shrink());
-    },
-  );
+    }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
 
   testWidgets('shelf opens editor directly, with preview in the book menu', (
     tester,
@@ -566,5 +568,5 @@ void main() {
     await settleShelf(tester);
     expect(find.byType(ChapterEditor), findsOneWidget);
     expect(find.widgetWithText(AppBar, '新书名'), findsOneWidget);
-  });
+  }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
 }
