@@ -23,6 +23,9 @@ android {
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName
+        // The RTC SDK's required ByteNN library is only supplied for ARM.
+        // API 36 Google APIs emulators can execute ARM64 via native translation.
+        ndk { abiFilters += "arm64-v8a" }
     }
 
     buildTypes {
@@ -43,3 +46,15 @@ kotlin {
 flutter {
     source = "../.."
 }
+
+// ByteNN in the locked RTC SDK requires the NDK's shared C++ runtime.
+// Generate it from the installed NDK rather than committing native binaries.
+val prepareRtcCppRuntime = tasks.register<Copy>("prepareRtcCppRuntime") {
+    from(androidComponents.sdkComponents.ndkDirectory.map { ndk ->
+        ndk.asFile.resolve("toolchains/llvm/prebuilt").listFiles()!!.single()
+            .resolve("sysroot/usr/lib/aarch64-linux-android/libc++_shared.so")
+    })
+    into(layout.buildDirectory.dir("generated/rtc-jni/arm64-v8a"))
+}
+android.sourceSets.getByName("main").jniLibs.srcDir(layout.buildDirectory.dir("generated/rtc-jni").get().asFile)
+tasks.named("preBuild") { dependsOn(prepareRtcCppRuntime) }

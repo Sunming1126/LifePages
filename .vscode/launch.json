@@ -6,6 +6,14 @@
       "request": "launch",
       "type": "dart",
       "program": "lib/main.dart"
+    },
+    {
+      "name": "LifePages Android (ARM64 RTC)",
+      "request": "launch",
+      "type": "dart",
+      "program": "lib/main.dart",
+      "preLaunchTask": "Build Android ARM64 debug",
+      "toolArgs": ["--use-application-binary=build/app/outputs/flutter-apk/app-debug.apk"]
     }
   ]
 }
