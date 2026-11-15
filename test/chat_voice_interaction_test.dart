@@ -433,6 +433,11 @@ void main() {
 
         await record();
         expect(capture.starts, 1);
+        // Windows may complete the WAV write after the fixed frame flushes.
+        // Wait for the observable request, while keeping the exact count below.
+        for (var i = 0; i < 20 && api.turns.isEmpty; i++) {
+          await flush(tester);
+        }
         expect(api.turns, hasLength(1));
         expect(player.segments, [
           [0],
