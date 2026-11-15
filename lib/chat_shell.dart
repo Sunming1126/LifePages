@@ -1185,7 +1185,7 @@ class _FreeChatPageState extends State<FreeChatPage>
   }
 
   Future<bool> _canStreamSpeech() async {
-    if (!(Platform.isIOS || widget.replyPlayer != null) ||
+    if (!(Platform.isIOS || Platform.isAndroid || widget.replyPlayer != null) ||
         !_foreground ||
         !widget.active ||
         !mounted) {
@@ -1244,7 +1244,7 @@ class _FreeChatPageState extends State<FreeChatPage>
     bool requested = false,
   }) async {
     final id = message.id;
-    if (!(Platform.isIOS || widget.replyPlayer != null) ||
+    if (!(Platform.isIOS || Platform.isAndroid || widget.replyPlayer != null) ||
         !widget.active ||
         !_foreground ||
         recording ||
@@ -2374,7 +2374,7 @@ class _FreeChatPageState extends State<FreeChatPage>
     final text = m['text'] as String? ?? '';
     final assistant = m['role'] == 'assistant';
     final canPlay =
-        (Platform.isIOS || widget.replyPlayer != null) &&
+        (Platform.isIOS || Platform.isAndroid || widget.replyPlayer != null) &&
         assistant &&
         id != null;
     final hasRecording =
