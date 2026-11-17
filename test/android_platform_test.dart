@@ -61,11 +61,11 @@ void main() {
           await tester.pumpAndSettle();
           expect(
             find.text('成书'),
-            platform == TargetPlatform.iOS ? findsOneWidget : findsNothing,
+            findsOneWidget,
           );
           expect(
             find.text('导出 PDF'),
-            platform == TargetPlatform.iOS ? findsOneWidget : findsNothing,
+            findsOneWidget,
           );
           expect(tester.takeException(), isNull);
         },

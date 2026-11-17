@@ -1,5 +1,6 @@
 import 'book_cover.dart';
 import 'platform_capabilities.dart';
+import 'package:flutter/foundation.dart' show defaultTargetPlatform;
 import 'chat_sheet.dart';
 import 'chapter_editor.dart';
 import 'reading_preferences.dart';
@@ -1456,6 +1457,16 @@ class _ChapterPageState extends State<ChapterPage> {
   );
 }
 
+List<List<bool>> bookQrModules(String url) {
+  if (url.isEmpty) return const [];
+  final image = QrImage(QrCode.fromData(
+    data: url,
+    errorCorrectLevel: QrErrorCorrectLevel.M,
+  ));
+  return List.generate(image.moduleCount, (y) =>
+      List.generate(image.moduleCount, (x) => image.isDark(y, x)));
+}
+
 class QrPainter extends CustomPainter {
   final String data;
   QrPainter(this.data);
@@ -1836,6 +1847,8 @@ class _BookPageState extends State<BookPage> {
         'title': chapter['title'],
         'content': chapter['content'],
         'url': urls[chapter['id']] ?? '',
+        if (defaultTargetPlatform == TargetPlatform.android)
+          'qr': bookQrModules(urls[chapter['id']] ?? ''),
         'label': _chapterLabel(chapter, index),
         if (blocks.any((block) => block['kind'] == 'image'))
           'blocks': [

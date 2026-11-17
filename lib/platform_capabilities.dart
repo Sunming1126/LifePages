@@ -1,9 +1,9 @@
 import 'package:flutter/foundation.dart';
 
-/// Native photo and book-printing channels currently exist only on iOS.
+/// The photo channel currently exists only on iOS.
 /// Keep non-Android behavior unchanged while Android integration is staged.
 bool get supportsNativePhotos =>
     kIsWeb || defaultTargetPlatform != TargetPlatform.android;
 
-bool get supportsNativeBookExport =>
-    kIsWeb || defaultTargetPlatform != TargetPlatform.android;
+/// Both mobile platforms implement the book-printing channel.
+bool get supportsNativeBookExport => true;

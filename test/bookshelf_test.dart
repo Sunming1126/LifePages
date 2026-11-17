@@ -2,13 +2,14 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart' show defaultTargetPlatform;
 import 'package:flutter/services.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:life_pages/chat_shell.dart';
 import 'package:life_pages/chapter_editor.dart';
 import 'package:life_pages/bookshelf.dart' show newBookSheet;
-import 'package:life_pages/main.dart' show Api, BookPage, paper, secure;
+import 'package:life_pages/main.dart' show Api, BookPage, paper, secure, bookQrModules;
 import 'package:life_pages/book_cover.dart';
 
 class ShelfApi extends Api {
@@ -275,7 +276,11 @@ void main() {
       'https://test/listen/exported',
       '',
     ]);
-  }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
+    if (defaultTargetPlatform == TargetPlatform.android) {
+      expect(chapters.first['qr'], bookQrModules('https://test/listen/exported'));
+      expect(chapters.last['qr'], isEmpty);
+    }
+  }, variant: TargetPlatformVariant({TargetPlatform.iOS, TargetPlatform.android}));
 
   testWidgets('shelf creates, switches, trashes and restores books', (
     tester,
