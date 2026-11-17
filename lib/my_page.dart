@@ -14,14 +14,22 @@ import 'membership/membership_sheet.dart';
 import 'reading_preferences.dart';
 
 enum PageBackground {
-  paperTone('暖纸', paper),
-  mist('雾灰', Color(0xffeeeff0)),
-  tea('浅茶', Color(0xfff1e7d8)),
-  celadon('淡青', Color(0xffe9efea));
+  paperTone('窗光暖纸', paper, AssetImage('assets/backgrounds/warm-paper.webp')),
+  celadon(
+    '青岚远山',
+    Color(0xffe9efea),
+    AssetImage('assets/backgrounds/celadon-mist.webp'),
+  ),
+  album(
+    '旧相册',
+    Color(0xfff4e8db),
+    AssetImage('assets/backgrounds/photo-album.webp'),
+  );
 
-  const PageBackground(this.label, this.color);
+  const PageBackground(this.label, this.color, this.image);
   final String label;
   final Color color;
+  final AssetImage image;
 }
 
 class MyPage extends StatefulWidget {
@@ -212,23 +220,41 @@ class _MyPageState extends State<MyPage> with WidgetsBindingObserver {
   Future<void> _pickBackground(BuildContext context) async {
     final next = await showChatSheet<PageBackground>(
       context: context,
-      builder: (sheet) => ListView(
-        shrinkWrap: true,
-        children: [
-          const ListTile(title: Text('页面背景')),
-          for (final choice in PageBackground.values)
-            ListTile(
-              leading: CircleAvatar(backgroundColor: choice.color),
-              title: Text(choice.label),
-              trailing: choice == widget.background
-                  ? const Icon(Icons.check_rounded, color: _profileAccent)
-                  : null,
-              onTap: () => Navigator.pop(sheet, choice),
-            ),
-        ],
+      builder: (sheet) => Center(
+        heightFactor: 1,
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 420),
+          child: ListView(
+            shrinkWrap: true,
+            padding: const EdgeInsets.fromLTRB(4, 0, 4, 4),
+            children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(0, 12, 0, 14),
+                child: Text(
+                  '页面背景',
+                  style: Theme.of(sheet).textTheme.titleLarge,
+                ),
+              ),
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                spacing: 8,
+                children: [
+                  for (final choice in PageBackground.values)
+                    Expanded(
+                      child: _BackgroundOption(
+                        background: choice,
+                        selected: choice == widget.background,
+                        onTap: () => Navigator.pop(sheet, choice),
+                      ),
+                    ),
+                ],
+              ),
+            ],
+          ),
+        ),
       ),
     );
-    if (context.mounted && next != null && next != widget.background) {
+    if (context.mounted && next != null) {
       widget.onBackgroundChanged(next);
     }
   }
@@ -406,6 +432,75 @@ Widget _entry(
   onTap: onTap,
 );
 const _profileAccent = Color(0xff745832);
+
+class _BackgroundOption extends StatelessWidget {
+  const _BackgroundOption({
+    required this.background,
+    required this.selected,
+    required this.onTap,
+  });
+
+  final PageBackground background;
+  final bool selected;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final radius = BorderRadius.circular(14);
+    return Semantics(
+      button: true,
+      selected: selected,
+      child: InkWell(
+        borderRadius: radius,
+        onTap: onTap,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            AspectRatio(
+              aspectRatio: 0.5,
+              child: Ink(
+                decoration: BoxDecoration(
+                  color: background.color,
+                  borderRadius: radius,
+                  image: DecorationImage(
+                    image: ResizeImage(background.image, width: 320),
+                    fit: BoxFit.cover,
+                  ),
+                  border: Border.all(
+                    color: selected ? _profileAccent : const Color(0xffded6ca),
+                    width: selected ? 2 : 1,
+                  ),
+                ),
+                child: selected
+                    ? const Align(
+                        alignment: Alignment.topRight,
+                        child: Padding(
+                          padding: EdgeInsets.all(7),
+                          child: CircleAvatar(
+                            radius: 11,
+                            backgroundColor: _profileAccent,
+                            foregroundColor: Colors.white,
+                            child: Icon(Icons.check_rounded, size: 16),
+                          ),
+                        ),
+                      )
+                    : null,
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(2, 8, 2, 4),
+              child: Text(
+                background.label,
+                textAlign: TextAlign.center,
+                style: Theme.of(context).textTheme.labelLarge,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
 
 class _AccountSettingsPage extends StatelessWidget {
   const _AccountSettingsPage({

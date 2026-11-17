@@ -4,7 +4,7 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:life_pages/account/profile_editor.dart';
 import 'package:life_pages/chat_shell.dart';
-import 'package:life_pages/main.dart' show Api, paper;
+import 'package:life_pages/main.dart' show Api;
 import 'package:life_pages/my_page.dart' show PageBackground;
 import 'package:life_pages/reading_preferences.dart';
 
@@ -234,11 +234,15 @@ void main() {
       await tester.pumpAndSettle();
     }
 
-    Color? pageColor() =>
-        tester.widget<Scaffold>(find.byType(Scaffold).first).backgroundColor;
+    ImageProvider<Object>? pageImage() {
+      final background = tester.widget<DecoratedBox>(
+        find.byKey(const ValueKey('main-page-background')),
+      );
+      return (background.decoration as BoxDecoration).image?.image;
+    }
 
     await openApp();
-    expect(pageColor(), paper);
+    expect(pageImage(), PageBackground.paperTone.image);
     await openProfile();
     expect(find.text('未登录'), findsOneWidget);
     expect(find.text('登录账号'), findsNothing);
@@ -304,25 +308,38 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.text('页面背景'));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('淡青'));
+    final sheet = find.byKey(const ValueKey('chat-bottom-sheet'));
+    for (final background in PageBackground.values) {
+      expect(
+        find.descendant(of: sheet, matching: find.text(background.label)),
+        findsOneWidget,
+      );
+    }
+    expect(find.byIcon(Icons.check_rounded), findsOneWidget);
+    await tester.tap(find.text('青岚远山'));
     await tester.pumpAndSettle();
-    expect(pageColor(), PageBackground.celadon.color);
-    expect(find.text('淡青'), findsOneWidget);
+    expect(pageImage(), PageBackground.celadon.image);
+    expect(find.text('青岚远山'), findsOneWidget);
     final navigation = find.byType(OneSayChatNavigation);
     await tester.tap(
       find.descendant(of: navigation, matching: find.text('书架')).first,
     );
     await tester.pumpAndSettle();
-    expect(pageColor(), PageBackground.celadon.color);
+    expect(pageImage(), PageBackground.celadon.image);
 
     await tester.pumpWidget(const SizedBox.shrink());
     await openApp();
-    expect(pageColor(), PageBackground.celadon.color);
+    expect(pageImage(), PageBackground.celadon.image);
     await openProfile();
     await tester.tap(find.byTooltip('设置'));
     await tester.pumpAndSettle();
     await tester.tap(find.text('我的订单'));
     await tester.pumpAndSettle();
     expect(find.text('订单功能尚未开放。'), findsOneWidget);
+
+    await tester.pumpWidget(const SizedBox.shrink());
+    FlutterSecureStorage.setMockInitialValues({'page_background': 'mist'});
+    await openApp();
+    expect(pageImage(), PageBackground.paperTone.image);
   });
 }
