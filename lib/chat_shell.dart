@@ -929,6 +929,7 @@ class _FreeChatPageState extends State<FreeChatPage>
   });
 
   Future<void> load() async {
+    if (_sessionId != null) _saveTextDraft();
     setState(() {
       loading = true;
       _topicLoadError = null;
