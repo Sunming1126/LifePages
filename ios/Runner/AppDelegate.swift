@@ -87,12 +87,13 @@ import UIKit
     value.replacingOccurrences(of: "&", with: "&amp;").replacingOccurrences(of: "<", with: "&lt;").replacingOccurrences(of: ">", with: "&gt;").replacingOccurrences(of: "\"", with: "&quot;")
   }
 
-  private static func qrData(_ value: String) -> String? {
+  private static func qrImage(_ value: String, context: CIContext) -> UIImage? {
     guard let filter = CIFilter(name: "CIQRCodeGenerator") else { return nil }
     filter.setValue(value.data(using: .utf8), forKey: "inputMessage")
     filter.setValue("M", forKey: "inputCorrectionLevel")
-    guard let output = filter.outputImage?.transformed(by: CGAffineTransform(scaleX: 8, y: 8)), let image = CIContext().createCGImage(output, from: output.extent) else { return nil }
-    return UIImage(cgImage: image).pngData()?.base64EncodedString()
+    guard let output = filter.outputImage,
+          let image = context.createCGImage(output, from: output.extent) else { return nil }
+    return UIImage(cgImage: image)
   }
 
   private static func paragraphs(_ text: String) -> String {
@@ -101,11 +102,12 @@ import UIKit
       .map { "<p>\(escape($0))</p>" }.joined()
   }
 
-  private static func renderBook(title: String, author: String?, chapters: [[String: Any]]) throws -> Data {
+  static func renderBook(title: String, author: String?, chapters: [[String: Any]]) throws -> Data {
     let paper = CGRect(x: 0, y: 0, width: 595.2, height: 841.8)
     let printable = paper.insetBy(dx: 55, dy: 48)
     let cover = "<section class='cover'><div class='eyebrow'>LIFE PAGES</div><h1>\(escape(title))</h1><hr/><p>\(escape(author.map { "\($0) 著" } ?? "时光有声，故事有迹"))</p></section>"
-    let chapterSections = try chapters.enumerated().map { index, chapter in
+    let qrContext = CIContext()
+    let chapterSections = try chapters.enumerated().map { index, chapter -> (html: String, qr: UIImage?) in
       let body: String
       if let blocks = chapter["blocks"] as? [[String: String]] {
         body = try blocks.map { block in
@@ -117,12 +119,18 @@ import UIKit
       } else {
         body = paragraphs(chapter["content"] as? String ?? "")
       }
-      var voice = ""
+      let qr: UIImage?
       if let url = chapter["url"] as? String, !url.isEmpty {
-        guard let qr = qrData(url) else { throw BookPDFError.invalidDocument }
-        voice = "<div class='voice'><img src='data:image/png;base64,\(qr)'/><div>扫码聆听原声</div></div>"
+        guard let image = qrImage(url, context: qrContext) else { throw BookPDFError.invalidDocument }
+        qr = image
+      } else {
+        qr = nil
       }
-      return "<section class='chapter'><div class='eyebrow'>\(escape(chapter["label"] as? String ?? "第 \(index + 1) 章"))</div><h2>\(escape(chapter["title"] as? String ?? ""))</h2>\(body)\(voice)</section>"
+      // Keep space for the QR on the chapter's last page. The PDF renderer
+      // draws it there after the formatter draws the text.
+      let voiceSpace = qr == nil ? "" : "<table class='voice-space' aria-hidden='true'><tr><td>&nbsp;</td></tr></table>"
+      let html = "<section class='chapter'><div class='eyebrow'>\(escape(chapter["label"] as? String ?? "第 \(index + 1) 章"))</div><h2>\(escape(chapter["title"] as? String ?? ""))</h2>\(body)\(voiceSpace)</section>"
+      return (html, qr)
     }
 
     func layout(withPages pages: [Int]) -> (NumberedBookRenderer, [Int]) {
@@ -140,7 +148,8 @@ import UIKit
       let toc = "<section class='toc'><h2>目录</h2><table>\(entries)</table></section>"
       var starts: [Int] = []
       var nextPage = 0
-      for (index, section) in ([cover, toc] + chapterSections).enumerated() {
+      let sections: [(html: String, qr: UIImage?)] = [(cover, nil), (toc, nil)] + chapterSections
+      for (index, section) in sections.enumerated() {
         let formatter = UIMarkupTextPrintFormatter(markupText: """
         <!doctype html><html lang="zh-CN"><meta charset="utf-8"><style>
         body { font-family: 'Songti SC', 'PingFang SC', serif; color:#302c27; font-size:12pt; line-height:1.9; overflow-wrap:anywhere; }
@@ -155,13 +164,14 @@ import UIKit
         .chapter p { text-indent:2em; margin:0 0 12pt; orphans:2; widows:2; }
         .photo { text-align:center; margin:12pt 0; page-break-inside:avoid; }
         .photo img { max-width:100%; max-height:420pt; }
-        .voice { text-align:center; margin:24pt auto; page-break-inside:avoid; font-size:9pt; color:#746b60; }
-        .voice img { width:105pt; height:105pt; padding:10pt; background:white; }
-        </style><body>\(section)</body></html>
+        .voice-space, .voice-space tr { break-inside:avoid; page-break-inside:avoid; }
+        .voice-space td { height:\(NumberedBookRenderer.voiceSpace)pt; padding:0; border:0; }
+        </style><body>\(section.html)</body></html>
         """)
         if index >= 2 { starts.append(nextPage) }
         renderer.addPrintFormatter(formatter, startingAtPageAt: nextPage)
         nextPage = renderer.numberOfPages
+        if let qr = section.qr { renderer.voiceCodes[nextPage - 1] = qr }
       }
       return (renderer, starts)
     }
@@ -271,6 +281,30 @@ private enum BookPDFError: Error {
 }
 
 private final class NumberedBookRenderer: UIPrintPageRenderer {
+  static let voiceSpace: CGFloat = 156
+  var voiceCodes: [Int: UIImage] = [:]
+
+  override func drawPage(at pageIndex: Int, in printableRect: CGRect) {
+    super.drawPage(at: pageIndex, in: printableRect)
+    guard let qr = voiceCodes[pageIndex], let context = UIGraphicsGetCurrentContext() else { return }
+    let area = self.printableRect
+    let bottom = area.maxY - footerHeight
+    let frame = CGRect(x: area.midX - 64, y: bottom - 147, width: 128, height: 128)
+    context.saveGState()
+    context.setFillColor(UIColor.white.cgColor)
+    context.fill(frame)
+    context.interpolationQuality = .none
+    let quietZone = frame.width * 4 / (qr.size.width + 8)
+    qr.draw(in: frame.insetBy(dx: quietZone, dy: quietZone))
+    context.restoreGState()
+
+    let caption = NSAttributedString(string: "扫码聆听原声", attributes: [
+      .font: UIFont.systemFont(ofSize: 9),
+      .foregroundColor: UIColor.darkGray,
+    ])
+    caption.draw(at: CGPoint(x: area.midX - caption.size().width / 2, y: bottom - 16))
+  }
+
   override func drawFooterForPage(at pageIndex: Int, in footerRect: CGRect) {
     guard pageIndex > 0 else { return }
     let number = NSAttributedString(string: String(pageIndex), attributes: [
