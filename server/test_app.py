@@ -24,6 +24,23 @@ def wav():
 
 
 class FlowTest(unittest.IsolatedAsyncioTestCase):
+    async def test_bailian_chapter_json_requests_disable_thinking(self):
+        def reply(request):
+            body = json.loads(request.content)
+            self.assertEqual(body['response_format'], {'type': 'json_object'})
+            self.assertIs(body['enable_thinking'], False)
+            return httpx.Response(200, json={'choices': [
+                {'finish_reason': 'stop', 'message': {'content': '{"body":"","source_ids":[]}'}}
+            ]})
+
+        transport = httpx.MockTransport(reply)
+        provider = httpx.AsyncClient(transport=transport)
+        config = ('test-key', 'https://dashscope.aliyuncs.com/compatible-mode/v1', 'qwen3.7-flash')
+        with patch.object(backend, 'read_llm_config', return_value=config), \
+                patch.object(backend.httpx, 'AsyncClient', return_value=provider):
+            result = await backend.llm('只输出 JSON', '虚构讲述', json_mode=True)
+        self.assertEqual(json.loads(result), {'body': '', 'source_ids': []})
+
     async def asyncSetUp(self):
         self.client = httpx.AsyncClient(transport=httpx.ASGITransport(app=backend.app), base_url='http://test')
         token = (await self.client.post('/api/bootstrap')).json()['token']

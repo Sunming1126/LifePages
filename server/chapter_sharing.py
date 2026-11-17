@@ -10,7 +10,12 @@ def has_table(c, name):
 
 
 def extract_question(text):
-    return ' '.join(part.strip() for part in re.findall(r'[^。！？!?\n]*[？?]', text))
+    parts = re.findall(r'[^。！？!?\n]*[？?]', text)
+    if not parts:
+        last = re.split(r'[。！!\n]', text.rstrip('。！!\n '))[-1].strip()
+        if re.search(r'(?:吗|么|呢)$|(?:怎么|什么|谁|哪里|哪儿).*[呀啊]$', last):
+            parts = [last + '？']
+    return ' '.join(part.strip() for part in parts)
 
 
 def preceding_question(c, pid, sid, sequence):
@@ -45,19 +50,31 @@ def remember_question(c, pid, sid, mid):
 
 
 def preserve_before_refresh(c, pid, sid, sequence, text, *, opening):
-    following = c.execute('''SELECT m.id,m.role,m.audio FROM chat_session_messages sm
+    following = c.execute('''SELECT m.id,m.role FROM chat_session_messages sm
         JOIN messages m ON m.id=sm.message_id WHERE sm.session_id=? AND m.person_id=?
         AND m.rowid>? AND m.role IN ('assistant','user') ORDER BY m.rowid LIMIT 1''',
         (sid, pid, sequence)).fetchone()
-    if following and following['role'] == 'user' and following['audio']:
+    if following and following['role'] == 'user':
         save_question(c, following['id'], extract_question(text) or (text.strip() if opening else ''))
 
 
-def recording_question(c, chapter, topic_id, mid):
+def saved_question(c, mid):
     if has_table(c, 'recording_questions'):
         saved = c.execute('SELECT question FROM recording_questions WHERE message_id=?', (mid,)).fetchone()
         if saved is not None:
             return saved['question']
+    return None
+
+
+def answer_question(c, pid, sid, mid, sequence):
+    saved = saved_question(c, mid)
+    return saved if saved is not None else preceding_question(c, pid, sid, sequence)
+
+
+def recording_question(c, chapter, topic_id, mid):
+    # Archived recordings still keep the question captured before migration.
+    if (saved := saved_question(c, mid)) is not None:
+        return saved
     pid = chapter['person_id']
     recording = c.execute("SELECT rowid FROM messages WHERE id=? AND person_id=? AND role='user'",
                           (mid, pid)).fetchone()

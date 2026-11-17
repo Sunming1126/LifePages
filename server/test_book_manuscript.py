@@ -111,7 +111,7 @@ class ManuscriptTests(unittest.IsolatedAsyncioTestCase):
             })
         source = narration.json()['user_id']
         with patch.object(backend, 'llm', AsyncMock(return_value=json.dumps({
-            'body': '旧版整理的正文。', 'source_ids': [source],
+            'body': '旧版整理的正文。', 'source_ids': [1],
         }))):
             self.assertEqual((await self.client.post(f'{path}/compile')).status_code, 200)
         current = (await self.client.get(content)).json()
@@ -155,7 +155,7 @@ class ManuscriptTests(unittest.IsolatedAsyncioTestCase):
                 'request_id': uuid.uuid4().hex, 'session_id': tid, 'text': '后来我们搬到了城里。',
             })
         with patch.object(backend, 'llm', AsyncMock(return_value=json.dumps({
-            'body': '后来我们搬到了城里。', 'source_ids': [new.json()['user_id']],
+            'body': '后来我们搬到了城里。', 'source_ids': [1],
         }))) as llm:
             self.assertEqual((await self.client.post(f'{path}/draft')).json()['outcome'], 'created')
             self.assertIn('可追加的新段落', llm.call_args.args[0])
