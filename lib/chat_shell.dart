@@ -1,4 +1,5 @@
 import 'chat_sheet.dart';
+import 'voice_preferences.dart';
 import 'bookshelf.dart';
 import 'dart:async';
 import 'dart:convert';
@@ -94,6 +95,7 @@ class _ChatShellState extends State<ChatShell> {
   }
 
   void _applyRecords(dynamic state) {
+    unawaited(_api.writeSnapshot('/api/books', state));
     _books = List<BookRecord>.from(
       (state['books'] as List).map(
         (row) => Map<String, dynamic>.from(row as Map),
@@ -147,6 +149,17 @@ class _ChatShellState extends State<ChatShell> {
   }
 
   Future<void> _load() async {
+    try {
+      final saved = await _api.readSnapshot('/api/books');
+      if (saved is Map && saved['books'] is List && mounted) {
+        setState(() {
+          _apply(saved);
+          _loading = false;
+        });
+      }
+    } catch (_) {
+      // Ignore obsolete snapshots and try the server.
+    }
     try {
       final state = await _api.call('GET', '/api/books');
       unawaited(_cleanRetiredDrafts(state));
@@ -376,7 +389,18 @@ class _ChatShellState extends State<ChatShell> {
   );
 
   Widget? _shelfStatus() {
-    if (_loading) return const Center(child: CircularProgressIndicator());
+    if (_loading) {
+      return const Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text('正在加载书架…'),
+            SizedBox(height: 16),
+            CircularProgressIndicator(),
+          ],
+        ),
+      );
+    }
     if (_error == null) return null;
     return Center(
       child: Column(
@@ -669,7 +693,8 @@ class _FreeChatPageState extends State<FreeChatPage>
       isStopping ||
       _chapterLoading ||
       _switchingSession;
-  bool get _canSend => _sessionId != null && !_chatBusy && !_chapterLoadFailed;
+  bool get _canSend =>
+      _sessionId != null && !_chatBusy && !_chapterLoadFailed && !_offline;
   bool get _canSubmitText =>
       _canSend && !_sessionOutbox.any((turn) => turn['after_request'] != null);
 
@@ -704,16 +729,28 @@ class _FreeChatPageState extends State<FreeChatPage>
   String? wavPath;
   bool voiceFailed = false;
 
+  void _automaticAudioChanged() {
+    if (!automaticReplyAudio.value) {
+      final turn = _sendingTurn;
+      if (turn != null) turn['muted'] = true;
+      unawaited(_stopReply());
+    }
+  }
+
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    if (Platform.isAndroid) {
+      automaticReplyAudio.addListener(_automaticAudioChanged);
+    }
     load();
     unawaited(warmVoice());
   }
 
   @override
   void dispose() {
+    automaticReplyAudio.removeListener(_automaticAudioChanged);
     WidgetsBinding.instance.removeObserver(this);
     _replyEpoch++;
     unawaited(_replyPlayer.stop());
@@ -882,13 +919,40 @@ class _FreeChatPageState extends State<FreeChatPage>
   }
 
   bool _outboxLoaded = false;
+  bool _offline = false;
   String? _topicLoadError;
+  String get _openingCacheKey => 'chat-opening:${widget.personId}';
+  Future<void> _saveOpening() => chatApi.writeSnapshot(_openingCacheKey, {
+    'active_id': _sessionId,
+    'topics': _topicUpdates.value,
+    'messages': messages,
+  });
 
   Future<void> load() async {
     setState(() {
       loading = true;
       _topicLoadError = null;
     });
+    var restored = false;
+    try {
+      final saved = await chatApi.readSnapshot(_openingCacheKey);
+      if (saved is Map &&
+          saved['active_id'] is String &&
+          saved['messages'] is List &&
+          mounted) {
+        final topics = _decodeTopics(saved);
+        final history = List<dynamic>.from(saved['messages'] as List);
+        setState(() {
+          _sessionId = saved['active_id'] as String;
+          _topicUpdates.value = topics;
+          _chapterHistory[_session] = history;
+          loading = false;
+        });
+        restored = true;
+      }
+    } catch (_) {
+      // Ignore obsolete snapshots and try the server.
+    }
     try {
       if (!_outboxLoaded) {
         final file = await pendingFile();
@@ -921,6 +985,8 @@ class _FreeChatPageState extends State<FreeChatPage>
       _sessionId = sid;
       _topicUpdates.value = _decodeTopics(state);
       _chapterHistory[sid] = loaded;
+      _offline = false;
+      unawaited(_saveOpening());
       input.value = _sessionDrafts[sid] ?? TextEditingValue.empty;
       scrollToEnd();
       try {
@@ -929,11 +995,16 @@ class _FreeChatPageState extends State<FreeChatPage>
         // A separate outbox path prevents replay even if file cleanup needs a retry.
       }
     } catch (error) {
-      if (mounted) setState(() => _topicLoadError = errorText(error));
+      if (mounted) {
+        setState(() {
+          _offline = restored;
+          _topicLoadError = restored ? null : '暂时无法加载聊天，请联网后重试';
+        });
+      }
     } finally {
       if (mounted) setState(() => loading = false);
     }
-    if (_topicLoadError == null) _sendQueuedVoice();
+    if (_topicLoadError == null && !_offline) _sendQueuedVoice();
   }
 
   List<BookRecord> _decodeTopics(dynamic state) => (state['topics'] as List)
@@ -958,10 +1029,13 @@ class _FreeChatPageState extends State<FreeChatPage>
   }
 
   Future<List<dynamic>> _activateTopic(String session) async {
-    final result = await chatApi.call(
-      'PUT',
-      '$_topicsPath/$session/active?include_messages=true',
-    );
+    final result = await chatApi
+        .call('PUT', '$_topicsPath/$session/active?include_messages=true')
+        .timeout(
+          Platform.isAndroid
+              ? const Duration(seconds: 8)
+              : const Duration(minutes: 4),
+        );
     if (result['messages'] case final List messages) {
       return List<dynamic>.of(messages);
     }
@@ -981,6 +1055,7 @@ class _FreeChatPageState extends State<FreeChatPage>
       _streamText = '';
       awaitingReply = false;
     });
+    unawaited(_saveOpening());
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (scroll.hasClients) {
         scroll.animateTo(
@@ -1161,7 +1236,37 @@ class _FreeChatPageState extends State<FreeChatPage>
       if (mounted && _speakingReply == requestId) {
         setState(() => _speakingReply = assistantId);
       }
-      await _refreshSentTurn(turn);
+      if (Platform.isAndroid && saved != null && reply['user_id'] is String) {
+        // The stream's done event is sent after the server commits both messages.
+        // Render that acknowledgement immediately instead of waiting for another GET.
+        final session = _turnSession(turn);
+        final history = List<dynamic>.of(_chapterHistory[session] ?? const []);
+        for (final message in [
+          {
+            'id': reply['user_id'],
+            'role': 'user',
+            'text': text,
+            'request_id': turn['request_id'],
+            'has_audio': path != null,
+          },
+          {'id': saved.id, 'role': 'assistant', 'text': saved.text},
+        ]) {
+          if (!history.any((old) => old['id'] == message['id'])) {
+            history.add(message);
+          }
+        }
+        _chapterHistory[session] = history;
+        await _removeTurn(turn);
+        if (mounted) {
+          setState(() {
+            _streamText = '';
+            awaitingReply = false;
+          });
+        }
+        unawaited(_saveOpening());
+      } else {
+        await _refreshSentTurn(turn);
+      }
       if (!streamedSpeech &&
           turn['muted'] != true &&
           _turnSession(turn) == _session) {
@@ -1203,8 +1308,9 @@ class _FreeChatPageState extends State<FreeChatPage>
     }
     final epoch = _replyEpoch;
     try {
-      final allowed = await secure.read(key: replyConsentKey(widget.personId));
-      return allowed == 'yes' &&
+      if (Platform.isAndroid && !automaticReplyAudio.value) return false;
+      final allowed = await _ensureReplyAudio(prompt: Platform.isAndroid);
+      return allowed &&
           mounted &&
           widget.active &&
           _foreground &&
@@ -1249,6 +1355,54 @@ class _FreeChatPageState extends State<FreeChatPage>
     return _replyPlayer.stop();
   }
 
+  Future<bool> _ensureReplyAudio({required bool prompt}) async {
+    final key = replyConsentKey(widget.personId);
+    if (await secure.read(key: key) == 'yes') return true;
+    if (!prompt || !mounted || _allowReplyAudioPrompt) return false;
+    _allowReplyAudioPrompt = true;
+    try {
+      final allowed = await showChatSheet<bool>(
+        context: context,
+        builder: (sheet) => ChatSheetDialog(
+          title: const Text('开启 AI 语音回复'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text(
+                '开启后，AI 回复文字（可能包含回忆录中的个人信息）会发送给火山引擎合成语音，并通过实时音频房间播报。'
+                '请先取得讲述者同意。可在「我的 → 设置 → AI 数据授权」撤回。',
+              ),
+              TextButton(
+                onPressed: () =>
+                    AppLegalUrls.open(context, AppLegalUrls.privacy),
+                child: const Text('查看隐私政策'),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(sheet, false),
+              child: const Text('暂不开启'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(sheet, true),
+              child: const Text('同意并播放'),
+            ),
+          ],
+        ),
+      );
+      if (allowed != true) {
+        if (Platform.isAndroid) await saveAutomaticReplyAudio(false);
+        return false;
+      }
+      await secure.write(key: key, value: 'yes');
+      return true;
+    } finally {
+      _allowReplyAudioPrompt = false;
+    }
+  }
+
   Future<void> _playReply(
     RtcReplayMessage message, {
     bool requested = false,
@@ -1267,49 +1421,11 @@ class _FreeChatPageState extends State<FreeChatPage>
       return;
     }
     final epoch = ++_replyEpoch;
-    final key = replyConsentKey(widget.personId);
     try {
-      if (await secure.read(key: key) != 'yes') {
-        if (!requested || !mounted || epoch != _replyEpoch) return;
-        _allowReplyAudioPrompt = true;
-        try {
-          final allowed = await showChatSheet<bool>(
-            context: context,
-            builder: (sheet) => ChatSheetDialog(
-              title: const Text('开启 AI 语音回复'),
-              content: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Text(
-                    '开启后，AI 回复文字（可能包含回忆录中的个人信息）会发送给火山引擎合成语音，并通过实时音频房间播报。'
-                    '请先取得讲述者同意。可在「我的 → 设置 → AI 数据授权」撤回。',
-                  ),
-                  TextButton(
-                    onPressed: () =>
-                        AppLegalUrls.open(context, AppLegalUrls.privacy),
-                    child: const Text('查看隐私政策'),
-                  ),
-                ],
-              ),
-              actions: [
-                TextButton(
-                  onPressed: () => Navigator.pop(sheet, false),
-                  child: const Text('暂不开启'),
-                ),
-                FilledButton(
-                  onPressed: () => Navigator.pop(sheet, true),
-                  child: const Text('同意并播放'),
-                ),
-              ],
-            ),
-          );
-          if (allowed != true) return;
-          await secure.write(key: key, value: 'yes');
-        } finally {
-          _allowReplyAudioPrompt = false;
-        }
+      if (!requested && Platform.isAndroid && !automaticReplyAudio.value) {
+        return;
       }
+      if (!await _ensureReplyAudio(prompt: requested)) return;
       final voice = await ReplyVoice.load();
       if (!mounted || epoch != _replyEpoch || !widget.active || !_foreground) {
         return;
@@ -2157,6 +2273,12 @@ class _FreeChatPageState extends State<FreeChatPage>
                     ),
                   ),
                 ),
+                if (_offline)
+                  TextButton.icon(
+                    onPressed: load,
+                    icon: const Icon(Icons.wifi_off),
+                    label: const Text('正在显示离线内容，点此重新连接'),
+                  ),
                 if (_chapterLoadFailed)
                   TextButton.icon(
                     onPressed: () => _switchTopic(_session),

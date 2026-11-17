@@ -1,4 +1,6 @@
 import 'book_cover.dart';
+import 'offline_cache.dart';
+import 'voice_preferences.dart';
 import 'platform_capabilities.dart';
 import 'package:flutter/foundation.dart' show defaultTargetPlatform;
 import 'chat_sheet.dart';
@@ -29,8 +31,17 @@ final api = Api();
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  await Future.wait([LiquidGlassWidgets.initialize(), restoreReadingScale()]);
-  runApp(const LifePages());
+  if (Platform.isAndroid) {
+    runApp(const LifePages());
+    unawaited(restoreReadingScale());
+    unawaited(restoreAutomaticReplyAudio());
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      unawaited(LiquidGlassWidgets.initialize(enablePerformanceMonitor: false));
+    });
+  } else {
+    await Future.wait([LiquidGlassWidgets.initialize(), restoreReadingScale()]);
+    runApp(const LifePages());
+  }
 }
 
 class LifePages extends StatelessWidget {
@@ -93,7 +104,22 @@ class ApiFailure implements Exception {
 }
 
 class Api {
-  late final http.Client _client = http.Client();
+  Api({http.Client? client, ReadCache? cache, bool? offlineReads})
+    : _client = client ?? http.Client(),
+      _cache = cache ?? ReadCache(getApplicationSupportDirectory),
+      offlineReads = offlineReads ?? Platform.isAndroid;
+  final http.Client _client;
+  final ReadCache _cache;
+  final bool offlineReads;
+  String get _scope => '$base\u0000$token';
+  Future<dynamic> readSnapshot(String path) async =>
+      offlineReads && token.isNotEmpty ? _cache.read(_scope, path) : null;
+  Future<void> writeSnapshot(String path, dynamic data) async {
+    if (offlineReads && token.isNotEmpty) {
+      await _cache.write(_scope, path, data);
+    }
+  }
+
   String base = 'https://onesay.top/lifepages';
   String token = '';
   Map<String, String> get headers => {
@@ -108,10 +134,27 @@ class Api {
     final request = http.Request(method, Uri.parse('$base$path'))
       ..headers.addAll(headers);
     if (body != null) request.body = jsonEncode(body);
-    final response = await http.Response.fromStream(
-      await _client.send(request).timeout(const Duration(minutes: 4)),
-    );
-    return _responseData(response);
+    try {
+      final response =
+          await (() async => http.Response.fromStream(
+            await _client.send(request),
+          ))().timeout(
+            offlineReads && method == 'GET'
+                ? const Duration(seconds: 8)
+                : const Duration(minutes: 4),
+          );
+      final data = _responseData(response);
+      if (method == 'GET') await writeSnapshot(path, data);
+      return data;
+    } on ApiFailure {
+      rethrow;
+    } catch (_) {
+      if (method == 'GET') {
+        final saved = await readSnapshot(path);
+        if (saved != null) return saved;
+      }
+      rethrow;
+    }
   }
 
   dynamic _responseData(http.Response response) {
@@ -241,7 +284,13 @@ class _StartupState extends State<Startup> {
 
   Future<void> _newGuest() async {
     final bootstrapClient = Api()..base = api.base;
-    final result = await bootstrapClient.call('POST', '/api/bootstrap');
+    final result = await bootstrapClient
+        .call('POST', '/api/bootstrap')
+        .timeout(
+          Platform.isAndroid
+              ? const Duration(seconds: 8)
+              : const Duration(minutes: 4),
+        );
     final token = result['token'] as String;
     await secure.write(key: 'device_token', value: token);
     _guestToken = token;
@@ -283,7 +332,23 @@ class _StartupState extends State<Startup> {
   @override
   Widget build(BuildContext context) {
     if (loading) {
-      return const Scaffold(body: Center(child: CircularProgressIndicator()));
+      return const Scaffold(
+        body: Center(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                'LifePages',
+                style: TextStyle(fontSize: 28, fontWeight: FontWeight.bold),
+              ),
+              SizedBox(height: 20),
+              CircularProgressIndicator(),
+              SizedBox(height: 16),
+              Text('正在打开你的回忆录…'),
+            ],
+          ),
+        ),
+      );
     }
     if (error != null) {
       return Scaffold(
@@ -1459,12 +1524,13 @@ class _ChapterPageState extends State<ChapterPage> {
 
 List<List<bool>> bookQrModules(String url) {
   if (url.isEmpty) return const [];
-  final image = QrImage(QrCode.fromData(
-    data: url,
-    errorCorrectLevel: QrErrorCorrectLevel.M,
-  ));
-  return List.generate(image.moduleCount, (y) =>
-      List.generate(image.moduleCount, (x) => image.isDark(y, x)));
+  final image = QrImage(
+    QrCode.fromData(data: url, errorCorrectLevel: QrErrorCorrectLevel.M),
+  );
+  return List.generate(
+    image.moduleCount,
+    (y) => List.generate(image.moduleCount, (x) => image.isDark(y, x)),
+  );
 }
 
 class QrPainter extends CustomPainter {

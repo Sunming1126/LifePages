@@ -1,4 +1,6 @@
 import 'dart:async';
+import 'dart:io';
+import 'voice_preferences.dart';
 
 import 'package:flutter/material.dart';
 
@@ -381,6 +383,24 @@ class _MyPageState extends State<MyPage> with WidgetsBindingObserver {
                         _chooseVoice,
                         subtitle: '${_voice.label} · ${_voice.gender}',
                       ),
+                      if (Platform.isAndroid)
+                        ValueListenableBuilder<bool>(
+                          valueListenable: automaticReplyAudio,
+                          builder: (context, enabled, _) => SwitchListTile(
+                            title: const Text('AI 回复自动播报'),
+                            subtitle: const Text('默认开启，首次使用需确认语音授权'),
+                            value: enabled,
+                            onChanged: (next) async {
+                              try {
+                                await saveAutomaticReplyAudio(next);
+                              } catch (_) {
+                                if (context.mounted) {
+                                  showError(context, '暂时无法保存播报设置');
+                                }
+                              }
+                            },
+                          ),
+                        ),
                       const Divider(height: 1, indent: 54, endIndent: 16),
                       _entry(
                         Icons.palette_outlined,
