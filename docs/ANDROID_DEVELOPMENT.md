@@ -66,6 +66,16 @@ Android 模拟器、Android 真机和 iOS 的结果必须分开记录。暂不�
 
 ## Mac 接手
 
+## 2026-11-17 同步与语音验收准备
+
+- 合入远程 main 的 `e7acbc3`（Add illustrated page backgrounds），合并提交 `7c3c7d2`。保留新版三套插画背景、跨页背景偏好及旧偏好回退断言，同时保留安卓分支的 iOS 平台测试标记和 RTC 适配。pubspec.yaml 仅新增上游背景资源目录；未升级插件或改动锁文件。
+- 锁文件校验、静态分析、37 项 Flutter 测试均通过。ARM64 Debug 与 Profile APK 均已构建；本机模拟器当前安装 Profile 包，路径 `build/app/outputs/flutter-apk/app-profile.apk`。
+- 启用宿主机麦克风需要 `adb -s emulator-5554 emu avd hostmicon`；已验证返回 OK，应用 RECORD_AUDIO 为 foreground。启动脚本现在在设备启动完成后自动执行该配置，不会自动开始录音。
+- 此轮首次启动遇到模拟器焦点分发超时及残留 ANR 对话框，重启模拟器（保留数据）后已恢复，重新检查聊天页面及播放/录音入口可响应。若再次出现，保留实际错误记录，不能简单视为功能验收通过。
+- **真人转写及原声回听尚待本次现场录音或用户提供的真人样本。** 未使用静音、TTS 或模拟回调冒充真人测试；此前的非静音 RTC 接收证据属于 11-15 的验收记录，不是本轮真人录音证据。
+- 现场步骤：在当前模拟器聊天页按住“说话”读一段虚构经历，松手后确认转写文本、AI 回复及录音消息保存；长按已保存的语音消息回听；重启 App 后再次回听。另验收上滑取消不发送、网络中断后保留录音并可重试。开始实际录音前确认 Windows 允许桌面应用访问麦克风。
+- 本轮不修改 iOS 原生工程，不合并 main，不部署服务端；真人验收完成前保持安卓 PR 为草稿。
+
 协作规则独立草稿 PR：https://github.com/Sunming1126/LifePages/pull/1 。Mac 可先读取该 PR 的 AGENTS.md，审阅后再合并并拉取。
 
 安卓分支使用独立提交区分 Android 工程、共享界面能力判断、RTC 开关和 Windows 测试等待修正。先 `git fetch origin`，在独立 worktree 检出 `origin/android` 验证，避免切换正在开发的 iOS 工作目录。iOS 冒烟通过后再处理安卓 PR；不要强推、直接覆盖或把 main 重置为 android。

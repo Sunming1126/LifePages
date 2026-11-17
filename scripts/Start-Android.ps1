@@ -22,4 +22,6 @@ for ($attempt = 0; $attempt -lt 90; $attempt++) {
     Start-Sleep -Seconds 2
 }
 if (-not $ready) { throw 'Emulator did not boot within 3 minutes. Inspect Device Manager.' }
+& $adb -s $serial[0] emu avd hostmicon
+if ($LASTEXITCODE -ne 0) { throw 'Could not enable the host microphone input in the emulator.' }
 Write-Host "Ready: $($serial[0]). Select this device in VS Code and press F5."
