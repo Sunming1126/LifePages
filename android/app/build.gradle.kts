@@ -30,6 +30,11 @@ android {
 
     buildTypes {
         release {
+            // The locked RTC SDK uses JNI/reflection and references optional vendor
+            // audio and JSON integrations absent from this app. Keep its Java code
+            // intact; Flutter's Dart code still uses release AOT compilation.
+            isMinifyEnabled = false
+            isShrinkResources = false
             // TODO: Add your own signing config for the release build.
             // Signing with the debug keys for now, so `flutter run --release` works.
             signingConfig = signingConfigs.getByName("debug")
