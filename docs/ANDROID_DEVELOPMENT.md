@@ -64,8 +64,6 @@ Android 模拟器、Android 真机和 iOS 的结果必须分开记录。暂不�
 
 本机截图及测试接收的音频保存在 Git 忽略的 `artifacts/`，APK 位于 `build/app/outputs/flutter-apk/app-debug.apk`。
 
-## Mac 接手
-
 ## 2026-11-17 同步与语音验收准备
 
 - 合入远程 main 的 `e7acbc3`（Add illustrated page backgrounds），合并提交 `7c3c7d2`。保留新版三套插画背景、跨页背景偏好及旧偏好回退断言，同时保留安卓分支的 iOS 平台测试标记和 RTC 适配。pubspec.yaml 仅新增上游背景资源目录；未升级插件或改动锁文件。
@@ -75,6 +73,8 @@ Android 模拟器、Android 真机和 iOS 的结果必须分开记录。暂不�
 - **真人转写及原声回听尚待本次现场录音或用户提供的真人样本。** 未使用静音、TTS 或模拟回调冒充真人测试；此前的非静音 RTC 接收证据属于 11-15 的验收记录，不是本轮真人录音证据。
 - 现场步骤：在当前模拟器聊天页按住“说话”读一段虚构经历，松手后确认转写文本、AI 回复及录音消息保存；长按已保存的语音消息回听；重启 App 后再次回听。另验收上滑取消不发送、网络中断后保留录音并可重试。开始实际录音前确认 Windows 允许桌面应用访问麦克风。
 - 本轮不修改 iOS 原生工程，不合并 main，不部署服务端；真人验收完成前保持安卓 PR 为草稿。
+
+## Mac 接手
 
 协作规则独立草稿 PR：https://github.com/Sunming1126/LifePages/pull/1 。Mac 可先读取该 PR 的 AGENTS.md，审阅后再合并并拉取。
 
