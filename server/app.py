@@ -211,13 +211,20 @@ def llm_rate_limit(response):
     return HTTPException(429, 'AI 回复额度暂时用完，请等额度恢复后点击重试。')
 
 
-async def llm(system, context):
+async def llm(system, context, *, json_mode=False):
     key, base, model = read_llm_config()
+    body = {'model': model, 'messages': [{'role': 'system', 'content': system},
+            {'role': 'user', 'content': context}], 'max_tokens': 4096}
+    if json_mode and model == 'qwen3.7-flash' and urlparse(base).hostname == 'dashscope.aliyuncs.com':
+        body.update(enable_thinking=False, response_format={'type': 'json_object'})
     try:
         async with httpx.AsyncClient(timeout=120) as client:
-            response = await client.post(base + '/chat/completions', headers={'Authorization': f'Bearer {key}'}, json={'model': model, 'messages': [{'role': 'system', 'content': system}, {'role': 'user', 'content': context}], 'max_tokens': 4096})
+            response = await client.post(base + '/chat/completions', headers={'Authorization': f'Bearer {key}'}, json=body)
             response.raise_for_status()
-            value = response.json()['choices'][0]['message']['content'].strip()
+            choice = response.json()['choices'][0]
+            if json_mode and choice.get('finish_reason') == 'length':
+                raise HTTPException(502, 'AI 整理结果过长，请重试')
+            value = choice['message']['content'].strip()
             if not value:
                 raise ValueError('empty')
             return value

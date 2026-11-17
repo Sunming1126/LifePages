@@ -78,6 +78,44 @@ class BookTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(history[-1]['text'], alternative)
         self.assertEqual(history[-1]['id'], turn['assistant_id'])
 
+    async def test_chapter_draft_pairs_short_typed_answers_with_original_questions(self):
+        bid = (await self.client.get('/api/books')).json()['active_id']
+        tid = await self.open_topic(bid)
+        path = f'/api/people/{bid}'
+        opening, = (await self.client.get(path, params={'session_id': tid})).json()['messages']
+        question = '家里那口大铁锅平时拿来做什么呀'
+        answers = ['我想起家里有口大铁锅。', '主要用来烧饭。']
+        with patch.object(backend, 'llm', AsyncMock(side_effect=[question, '您继续说。'])):
+            first, second = [
+                (await self.client.post(f'{path}/turns', json={
+                    'session_id': tid, 'request_id': uuid.uuid4().hex, 'text': answer,
+                })).json() for answer in answers
+            ]
+        route = f'/api/books/{bid}/topics/{tid}'
+        with patch.object(backend, 'llm', AsyncMock(return_value=json.dumps({
+            'previous_angle': '经过', 'angle': '人物', 'question': '平时家里是谁做饭？',
+        }))):
+            refreshed = await self.client.post(f"{route}/messages/{first['assistant_id']}/refresh",
+                                               json={'text': question})
+            self.assertEqual(refreshed.status_code, 200, refreshed.text)
+
+        body = '家里有一口大铁锅，平时主要用来烧饭。'
+        with patch.object(backend, 'llm', AsyncMock(return_value=json.dumps({
+            'body': body, 'source_ids': [2],
+        }))) as model:
+            result = await self.client.post(f'{route}/compile')
+        self.assertEqual(result.status_code, 200, result.text)
+        material = json.loads(model.call_args.args[1])['新问答']
+        self.assertEqual(material, [
+            {'编号': 1, '提问': opening['text'].split('？')[0] + '？', '回答': answers[0]},
+            {'编号': 2, '提问': question + '？', '回答': answers[1]},
+        ])
+        cid = result.json()['id']
+        with closing(backend.db()) as c:
+            self.assertEqual(c.execute('SELECT content FROM chapters WHERE id=?', (cid,)).fetchone()[0], body)
+            self.assertEqual(c.execute('SELECT message_id FROM chapter_sources WHERE chapter_id=?',
+                                       (cid,)).fetchone()[0], second['user_id'])
+
     async def test_book_compilation_keeps_narrations_and_scopes_export_recordings(self):
         bid = (await self.client.get('/api/books')).json()['active_id']
         tid = await self.open_topic(bid)
@@ -106,7 +144,7 @@ class BookTests(unittest.IsolatedAsyncioTestCase):
 
         compile_path = f'/api/books/{bid}/topics/{tid}/compile'
         with patch.object(backend, 'llm', AsyncMock(return_value=json.dumps({
-            'body': '我的故乡在河边。', 'source_ids': [first],
+            'body': ['我的故乡在河边。'], 'source_ids': [1],
         }))) as model:
             result = await self.client.post(compile_path)
             self.assertEqual(result.status_code, 200, result.text)
@@ -172,7 +210,7 @@ class BookTests(unittest.IsolatedAsyncioTestCase):
             result = await self.client.post(f'/api/books/{bid}/topics/{unrelated}/compile')
             self.assertEqual(result.status_code, 200, result.text)
         compiled = (await self.client.get(chapters)).json()
-        self.assertEqual(compiled[1]['content'], '讲述原文\n\n长辈住在邻村。')
+        self.assertEqual(compiled[1]['content'], '讲述原文\n\n提问：家里哪位长辈或哪段家族故事，您一直记得？\n回答：长辈住在邻村。')
 
     async def test_scope_opening_and_review(self):
         shelf = (await self.client.get('/api/books')).json()
@@ -222,7 +260,7 @@ class BookTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.client.put(f'/api/books/{other}/topics/{tid}/active')).status_code, 404)
         drafts = f'/api/books/{bid}/topics/{tid}/draft'
         self.assertEqual(await book_api.make_draft(bid, tid, automatic=True), 'insufficient')
-        with patch.object(backend, 'llm', AsyncMock(return_value=json.dumps({'body': '我的故乡有一条老街。', 'source_ids': [mid]}))):
+        with patch.object(backend, 'llm', AsyncMock(return_value=json.dumps({'body': '我的故乡有一条老街。', 'source_ids': [1]}))):
             self.assertEqual((await self.client.post(drafts)).json()['outcome'], 'created')
         self.assertEqual((await self.client.get(f'/api/books/{bid}/chapters')).json(), [])
         proposal = (await self.client.get(drafts)).json()['draft']
@@ -281,7 +319,7 @@ class BookTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await book_api.make_draft(bid, tid, automatic=True), 'insufficient')
         with patch.object(backend, 'llm', AsyncMock(return_value='您慢慢说。')):
             messages.append(await tell(tid, '第三段故乡的故事。'))
-        reply = json.dumps({'body': '只整理故乡的正文。', 'source_ids': messages})
+        reply = json.dumps({'body': '只整理故乡的正文。', 'source_ids': [1, 2, 3]})
         with patch.object(backend, 'llm', AsyncMock(return_value=reply)) as model:
             self.assertEqual((await scheduler.run_once())['created'], 1)
             self.assertNotIn(foreign, model.call_args.args[1])
@@ -291,7 +329,7 @@ class BookTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(backend, 'llm', AsyncMock(return_value='您慢慢说。')):
             new = await tell(tid, '补充一段新往事。')
         with patch.object(backend, 'llm', AsyncMock(return_value=json.dumps({
-            'body': '模型生成的新正文。', 'source_ids': [new],
+            'body': '模型生成的新正文。', 'source_ids': [1],
         }))):
             self.assertEqual((await self.client.post(drafts)).json()['outcome'], 'created')
         did = (await self.client.get(drafts)).json()['draft']['id']
