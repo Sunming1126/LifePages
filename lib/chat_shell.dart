@@ -395,93 +395,103 @@ class _ChatShellState extends State<ChatShell> {
     final book = _book;
     final inset = MediaQuery.viewPaddingOf(context).bottom;
     final showNavigation = MediaQuery.viewInsetsOf(context).bottom == 0;
-    return Scaffold(
-      backgroundColor: _background.color,
-      resizeToAvoidBottomInset: true,
-      body: Stack(
-        children: [
-          Positioned.fill(
-            child: IndexedStack(
-              index: _tab,
-              children: [
-                if (status != null)
-                  status
-                else if (book == null)
-                  _empty()
-                else
-                  KeyedSubtree(
-                    key: ValueKey("chat-${book['id']}"),
-                    child: FreeChatPage(
-                      key: _chatKey,
-                      personId: book['id'] as String,
-                      bookTitle: book['title'] as String,
-                      bookDrafts: _drafts.putIfAbsent(
-                        book['id'] as String,
-                        () => {},
+    return DecoratedBox(
+      key: const ValueKey('main-page-background'),
+      decoration: BoxDecoration(
+        color: _background.color,
+        image: DecorationImage(image: _background.image, fit: BoxFit.cover),
+      ),
+      child: Scaffold(
+        backgroundColor: Colors.transparent,
+        resizeToAvoidBottomInset: true,
+        body: Stack(
+          children: [
+            Positioned.fill(
+              child: IndexedStack(
+                index: _tab,
+                children: [
+                  if (status != null)
+                    status
+                  else if (book == null)
+                    _empty()
+                  else
+                    KeyedSubtree(
+                      key: ValueKey("chat-${book['id']}"),
+                      child: FreeChatPage(
+                        key: _chatKey,
+                        personId: book['id'] as String,
+                        bookTitle: book['title'] as String,
+                        bookDrafts: _drafts.putIfAbsent(
+                          book['id'] as String,
+                          () => {},
+                        ),
+                        onChooseBook: _chooseBook,
+                        client: _api,
+                        documentsDirectory: widget.documentsDirectory,
+                        active: _tab == 0,
+                        showNavigation: showNavigation,
+                        onChapterChanged: _refreshCounts,
                       ),
-                      onChooseBook: _chooseBook,
-                      client: _api,
-                      documentsDirectory: widget.documentsDirectory,
-                      active: _tab == 0,
-                      showNavigation: showNavigation,
-                      onChapterChanged: _refreshCounts,
                     ),
+                  status ??
+                      Bookshelf(
+                        books: _books,
+                        activeId: _activeId,
+                        client: _api,
+                        busy: _busy,
+                        documentsDirectory: widget.documentsDirectory,
+                        onCreate: _create,
+                        onRecentlyDeleted: () => showRecentlyDeleted(
+                          context,
+                          books: _trash,
+                          onRestore: _restoreBook,
+                        ),
+                        onRename: _renameBook,
+                        onChaptersChanged: _chaptersChanged,
+                        onDelete: (id) =>
+                            _changeBook('DELETE', '/api/books/$id'),
+                      ),
+                  MyPage(
+                    books: _books,
+                    active: _tab == 2,
+                    navigationClearance: showNavigation
+                        ? inset +
+                              OneSayChatNavigation.bottomGap +
+                              OneSayChatNavigation.height
+                        : 0,
+                    trash: _trash,
+                    client: _api,
+                    email: widget.email,
+                    accountProvider: widget.accountProvider,
+                    onSignIn: widget.onSignIn,
+                    onSignOut: widget.onSignOut,
+                    background: _background,
+                    busy: _busy,
+                    onBackgroundChanged: _selectBackground,
+                    onRestore: _restoreBook,
                   ),
-                status ??
-                    Bookshelf(
-                      books: _books,
-                      activeId: _activeId,
-                      client: _api,
-                      busy: _busy,
-                      documentsDirectory: widget.documentsDirectory,
-                      onCreate: _create,
-                      onRecentlyDeleted: () => showRecentlyDeleted(
-                        context,
-                        books: _trash,
-                        onRestore: _restoreBook,
-                      ),
-                      onRename: _renameBook,
-                      onChaptersChanged: _chaptersChanged,
-                      onDelete: (id) => _changeBook('DELETE', '/api/books/$id'),
-                    ),
-                MyPage(
-                  books: _books,
-                  active: _tab == 2,
-                  navigationClearance: showNavigation
-                      ? inset +
-                            OneSayChatNavigation.bottomGap +
-                            OneSayChatNavigation.height
-                      : 0,
-                  trash: _trash,
-                  client: _api,
-                  email: widget.email,
-                  accountProvider: widget.accountProvider,
-                  onSignIn: widget.onSignIn,
-                  onSignOut: widget.onSignOut,
-                  background: _background,
-                  busy: _busy,
-                  onBackgroundChanged: _selectBackground,
-                  onRestore: _restoreBook,
-                ),
-              ],
-            ),
-          ),
-          if (showNavigation)
-            Positioned(
-              key: const ValueKey('main-liquid-glass-navigation'),
-              left: OneSayChatNavigation.horizontalInset,
-              right: OneSayChatNavigation.horizontalInset,
-              bottom: inset + OneSayChatNavigation.bottomGap,
-              height: OneSayChatNavigation.height,
-              child: OneSayChatNavigation(
-                selectedIndex: _tab,
-                onTabSelected: (value) {
-                  setState(() => _tab = value);
-                  if (value == 1 && status == null) unawaited(_refreshCounts());
-                },
+                ],
               ),
             ),
-        ],
+            if (showNavigation)
+              Positioned(
+                key: const ValueKey('main-liquid-glass-navigation'),
+                left: OneSayChatNavigation.horizontalInset,
+                right: OneSayChatNavigation.horizontalInset,
+                bottom: inset + OneSayChatNavigation.bottomGap,
+                height: OneSayChatNavigation.height,
+                child: OneSayChatNavigation(
+                  selectedIndex: _tab,
+                  onTabSelected: (value) {
+                    setState(() => _tab = value);
+                    if (value == 1 && status == null) {
+                      unawaited(_refreshCounts());
+                    }
+                  },
+                ),
+              ),
+          ],
+        ),
       ),
     );
   }
