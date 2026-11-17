@@ -6,7 +6,7 @@
 - Flutter 基线：3.44.2，revision `c9a6c484230f8b5e408ec57be1ef71dee1e77020`，与仓库 `.metadata` 一致。Dart 3.12.2。不要执行 `flutter upgrade` 或 `flutter pub upgrade`。
 - Android 包名 `com.caoyuming.lifepages`。SDK、Gradle 和 Flutter 的本机路径不提交；iOS 继续使用原包名和原生工程。
 - 复用 `https://onesay.top/lifepages` 的设备凭证、邮箱账号和数据接口；不新建安卓账号库，不部署后端。
-- 社交登录、选图、PDF 暂不接入 Android；会员页沿用现状，不代表支付已实现。
+- 社交登录、选图暂不接入 Android；会员页沿用现状，不代表支付已实现。安卓已支持成书和系统“保存为 PDF”。
 - 调试包仅用于开发。正式发布前必须另行配置发布签名、图标、支付及商店材料。
 
 ## Windows 环境
@@ -73,6 +73,16 @@ Android 模拟器、Android 真机和 iOS 的结果必须分开记录。暂不�
 - **真人转写及原声回听尚待本次现场录音或用户提供的真人样本。** 未使用静音、TTS 或模拟回调冒充真人测试；此前的非静音 RTC 接收证据属于 11-15 的验收记录，不是本轮真人录音证据。
 - 现场步骤：在当前模拟器聊天页按住“说话”读一段虚构经历，松手后确认转写文本、AI 回复及录音消息保存；长按已保存的语音消息回听；重启 App 后再次回听。另验收上滑取消不发送、网络中断后保留录音并可重试。开始实际录音前确认 Windows 允许桌面应用访问麦克风。
 - 本轮不修改 iOS 原生工程，不合并 main，不部署服务端；真人验收完成前保持安卓 PR 为草稿。
+
+## 成书和 PDF 二维码验收（main 6f552a8）
+
+- 合入 main 的 iOS 图标更新和 iOS PDF 二维码修复（`8277b87`、`6f552a8`）；安卓自身未改写 iOS 原生实现。
+- Android 原先隐藏的成书/PDF 入口现已启用，通过 `life_pages/print` 原生通道打开系统打印预览，选择“Save as PDF / 保存为 PDF”可保存文件。可打印中文、长正文分页、已有章节图片及原声二维码；无原声章节不生成空二维码。纸张采用 A4 排版。
+- Android 导出参数额外携带原声链接的 QR 模块矩阵（M 纠错）；iOS 导出参数及绘制实现保持原有行为。原生渲染为矢量黑白码，四模块留白；二维码空间不足时换页，不覆盖正文或图片。打印指定页时只输出所选页。
+- 自动检查：静态分析通过，38 项 Flutter 测试通过，包含 Android 与 iOS 成书生成分享链接、原声链接/二维码参数及无原声章节行为的检查。
+- 实机系统流程验证在本机 API 36 模拟器进行：隔离夹具 `tool/book_print_smoke.dart`（不访问后端、不读取真实书稿）点击“成书 → 开始成书 → 保存为 PDF”，导出 9 页。100 段长中文正文分页、图片正常；第 8 页含二维码，第 9 页无原声章节无二维码。将 PDF 以 216dpi 渲染并用 ZXing 解码，第 8 页得到 `https://example.org/lifepages/fictional-audio-check`，与夹具 URL 一致。该虚构链接仅验证二维码排版/编码，不代表测试了真实音频链接的播放或撤销。
+- PDF 和扫码图位于本机 Git 忽略的 `artifacts/lifepages-book-check.pdf`、`artifacts/book-qr-page.png`。正式交付 APK 必须用 `-t lib/main.dart` 构建；不可将夹具入口 APK 当正常 App 交付。
+- 本次交付为内部测试签名的 ARM64 Profile APK；与已验证的 Profile 构建模式一致，非商店发布包。iOS 运行仍待 Mac 回归；PR 保持草稿，不自动合并 main。
 
 ## Mac 接手
 

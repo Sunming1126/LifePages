@@ -6,7 +6,7 @@ Flutter iOS 口述回忆录：像聊天助手一样自由交流，按住麦克�
 
 `main` 保存当前 iOS 版本和可复用源码。`android` 从同一基线开始，在另一个本地目录开发。两边共享 Flutter 的 `lib/`、`assets/` 和 `test/`，后端在 `server/`。平台代码分别放在 `ios/` 与 `android/`。需要同步时先合并 `main` 到 `android`，再通过 PR 把通用改动合回 `main`。两边修改同一段共享代码时需要处理合并冲突。
 
-仓库包含 iOS 和 Android 工程。Windows 安卓环境、模拟器启动、首轮功能范围及验收记录见 [Android 开发说明](docs/ANDROID_DEVELOPMENT.md)，两端 Codex 遵循根目录 [AGENTS.md](AGENTS.md)。安卓首轮复用邮箱登录、记录与书稿流程，并接入现有 RTC 插件；社交登录、选图、PDF 和会员支付留待后续接入。
+仓库包含 iOS 和 Android 工程。Windows 安卓环境、模拟器启动、功能范围及验收记录见 [Android 开发说明](docs/ANDROID_DEVELOPMENT.md)，两端 Codex 遵循根目录 [AGENTS.md](AGENTS.md)。安卓复用邮箱登录、记录与书稿流程，接入 RTC 插件，并支持成书、原声二维码及系统“保存为 PDF”；社交登录、选图和会员支付留待后续接入。
 
 新检出的 iOS 工作目录先从 LifePages 的 Firebase 项目下载 `GoogleService-Info.plist` 到 `ios/Runner/`。Android 注册自己的包名后使用单独下载的 `android/app/google-services.json`。这两个本地配置文件、签名私钥、录音、数据库和构建产物由 Git 忽略。
 
