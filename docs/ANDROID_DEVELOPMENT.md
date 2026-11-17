@@ -89,3 +89,16 @@ Android 模拟器、Android 真机和 iOS 的结果必须分开记录。暂不�
 协作规则独立草稿 PR：https://github.com/Sunming1126/LifePages/pull/1 。Mac 可先读取该 PR 的 AGENTS.md，审阅后再合并并拉取。
 
 安卓分支使用独立提交区分 Android 工程、共享界面能力判断、RTC 开关和 Windows 测试等待修正。先 `git fetch origin`，在独立 worktree 检出 `origin/android` 验证，避免切换正在开发的 iOS 工作目录。iOS 冒烟通过后再处理安卓 PR；不要强推、直接覆盖或把 main 重置为 android。
+# 2026-11-17 晚间体验修复与成书同步
+
+- 分支：`android`；合入共同基线 `c67693a`（问答配对整理成书），合并提交 `127a164`。图标独立提交 `5dc9378`；共享启动、缓存、播报修复 `6bf7479`；重连保留输入草稿 `da0c27a`。未修改 iOS 原生文件、Flutter 或依赖版本，未合并 main。
+- 共享修改范围为 `lib/main.dart`、`lib/chat_shell.dart`、`lib/my_page.dart`、新增本地只读缓存和播报偏好模块及缓存测试。安卓优先显示首帧，再初始化玻璃效果；已有会话先显示上次成功加载的书架和聊天，后台刷新。网络读请求及首装访客创建有 8 秒等待上限。首次安装仍需联网创建访客；缓存不是完整离线数据库，音频、图片下载、发送及成书仍需联网。
+- 缓存存于应用私有目录，按服务器与凭证散列隔离；401/服务端错误不会用旧缓存掩盖，失败写操作也不会伪装成功。重连保留输入草稿。Android 备份保持关闭；缓存与用户内容不入库。
+- 安卓自动播报偏好默认开启，首次使用沿用语音服务数据授权；拒绝后关闭自动播报，可在「我的 → AI 回复自动播报」重新打开。收到服务端已提交的 SSE done 后直接更新消息，去掉结束时额外拉取历史的等待，保留 iOS 原有路径。该调整不承诺消除模型、网络或语音服务延迟。
+- 图标从仓库既有 iOS 1024px 图导出 Android 各密度图及自适应/单色图层，不修改 iOS 资源。API 36 模拟器应用抽屉已看到书本声波图标。
+- 模拟器实测：在线加载既有虚构测试书稿；关闭 Wi-Fi 与移动数据并强制结束后重启，书架正常显示缓存，聊天显示离线重连提示；恢复网络并重连后发送虚构英文测试文本，收到 AI 回复且出现「停止 AI 语音」，系统 AudioTrack 记录输出 620160 帧。自动播报开关默认 checked=true。未把这些检查当作真人录音转写或真机听感验收。
+- 后端测试在 WSL Ubuntu 隔离虚拟环境运行 `python -m unittest server.test_books server.test_book_manuscript server.test_app`，22 项通过；测试使用临时数据库及模拟模型。远程新增代码仅涉及后端，APK 不携带 Python 服务；线上新成书行为以服务端实际部署版本为准，本机未部署生产服务。
+- Windows 无法验证 iOS 构建，合并 main 前仍须 Mac 完成规则要求的 iOS 冒烟验证。原生 PDF 排版和二维码实现未改动；此前分页二维码解码验收见下方记录。
+- 修复后的 `flutter analyze --no-pub` 无问题，`flutter test --no-pub` 42 项通过。Release 的 Java/R8 压缩因锁定 RTC 包引用未提供的可选厂商/JSON 类而失败；安卓构建独立提交 `7b20af6` 关闭 Java 压缩和资源裁剪，保留 JNI/反射代码及现有依赖，Dart 仍使用 Release AOT。APK 使用原本机测试签名，非商店签名。
+- 最终交付使用正常 `lib/main.dart` 入口：`flutter build apk --release --no-pub --target-platform android-arm64 --build-number 4 -t lib/main.dart`。文件 `output/LifePages-Android-ARM64-20261117-v4.apk`，61,241,662 字节（58.4 MiB），SHA256 `ad62db8fea4f9c8687d0fda0de02d4003641211c2309d5fe8cc8867447b22033`。包名 `com.caoyuming.lifepages`，0.1.0 / versionCode 4，Android 7.0/API 24 起，ARM64；APK v2 签名校验通过。
+- 最终 Release 包在模拟器覆盖安装成功、保留原虚构书稿。再次关闭双网络并强制结束重启，首帧 1.954 秒；安装后的首次启动 11.506 秒，故不据此承诺所有设备均 2 秒启动。断网输入 `Fictional offline draft.`，联网刷新后输入仍在；发送后收到新回复并自动启动语音播放。模拟器网络已恢复。截图/XML 等验收产物留在忽略的 `artifacts/`，APK/测试虚拟环境位于忽略的 `output/`。
