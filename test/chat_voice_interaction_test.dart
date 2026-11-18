@@ -37,11 +37,13 @@ class Capture extends VoiceCapture {
 }
 
 class Wire extends VoiceWire {
-  Wire({this.recognizes = true});
+  Wire({this.recognizes = true, this.finishes = true});
 
   final bool recognizes;
+  final bool finishes;
   final incoming = StreamController<dynamic>.broadcast();
   int chunks = 0;
+  bool finishRequested = false;
   void event(String event, [Map<String, dynamic>? sentence]) => incoming.add(
     jsonEncode({
       'header': {'event': event},
@@ -58,7 +60,10 @@ class Wire extends VoiceWire {
     if (data is String) {
       final action = jsonDecode(data)['header']['action'];
       if (action == 'run-task') event('task-started');
-      if (action == 'finish-task') event('task-finished');
+      if (action == 'finish-task') {
+        finishRequested = true;
+        if (finishes) event('task-finished');
+      }
     } else if (recognizes) {
       chunks++;
       event('result-generated', {
@@ -77,6 +82,7 @@ class Wire extends VoiceWire {
 
 class ChatApi extends Api {
   final turns = <Map<String, dynamic>>[];
+  String? fallbackAudio;
   List<dynamic> history = [];
   final topics = [
     {
@@ -123,6 +129,10 @@ class ChatApi extends Api {
     String path, [
     Map<String, dynamic>? body,
   ]) async {
+    if (path == '/api/transcribe') {
+      fallbackAudio = body!['audio_base64'] as String;
+      return {'text': '我小时候住在海边。'};
+    }
     if (path.endsWith('/voice/token')) {
       return {
         'token': 'st-test',
@@ -245,6 +255,7 @@ void main() {
     int tab = 0,
     RtcReplyPlayer? player,
     bool recognizes = true,
+    bool finishes = true,
   }) => MaterialApp(
     theme: ThemeData(
       useMaterial3: true,
@@ -275,7 +286,10 @@ void main() {
                     client: api,
                     documentsDirectory: () async => dir,
                     voiceConnector: (url, headers) async {
-                      final w = Wire(recognizes: recognizes);
+                      final w = Wire(
+                        recognizes: recognizes,
+                        finishes: finishes,
+                      );
                       wires.add(w);
                       return w;
                     },
@@ -493,6 +507,37 @@ void main() {
       },
     );
   }
+
+  testWidgets(
+    'Android recovers a stalled realtime transcript with the saved WAV',
+    (tester) async {
+      await tester.pumpWidget(harness(finishes: false));
+      await flush(tester);
+      final gesture = await hold(tester);
+      capture.audio.add(List<int>.filled(3200, 1));
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 650)),
+      );
+      await gesture.up();
+      for (var i = 0; i < 5 && !wires.single.finishRequested; i++) {
+        await flush(tester);
+      }
+      expect(wires.single.finishRequested, isTrue);
+      expect(api.turns, isEmpty);
+      await tester.pump(const Duration(milliseconds: 3100));
+      for (var i = 0; i < 5 && api.turns.isEmpty; i++) {
+        await flush(tester);
+      }
+      final turn = api.turns.single;
+      expect(turn['text'], '我小时候住在海边。');
+      expect(turn['audio_base64'], api.fallbackAudio);
+      expect(
+        utf8.decode(base64Decode(api.fallbackAudio!).take(4).toList()),
+        'RIFF',
+      );
+    },
+    variant: TargetPlatformVariant.only(TargetPlatform.android),
+  );
 
   testWidgets('unrecognized voice is kept on disk and is not submitted', (
     tester,

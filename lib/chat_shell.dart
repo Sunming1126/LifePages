@@ -10,6 +10,7 @@ import 'onesay_transcript.dart';
 import 'dart:typed_data' show BytesBuilder;
 import 'dart:ui' show ImageFilter;
 
+import 'package:flutter/foundation.dart' show defaultTargetPlatform;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:liquid_glass_widgets/liquid_glass_widgets.dart';
@@ -1166,11 +1167,21 @@ class _FreeChatPageState extends State<FreeChatPage>
       final path = turn['audio_path'] as String?;
       String? encoded;
       if (path != null) {
-        encoded = base64Encode(await File(path).readAsBytes());
+        final audio = await File(path).readAsBytes();
+        encoded = base64Encode(audio);
         if (text.isEmpty) {
-          final transcribed = await chatApi.call('POST', '/api/transcribe', {
+          final transcribe = chatApi.call('POST', '/api/transcribe', {
             'audio_base64': encoded,
           });
+          // The fallback service streams the recording at roughly real-time pace.
+          // Allow for its duration, plus connection and recognition overhead.
+          final transcribed =
+              await (defaultTargetPlatform == TargetPlatform.android
+                  ? transcribe.timeout(
+                      Duration(seconds: 35 + audio.length ~/ (16000 * 2)),
+                      onTimeout: () => throw Exception('语音转写超时，录音已保留，可点重试。'),
+                    )
+                  : transcribe);
           text = (transcribed['text'] as String? ?? '').trim();
           if (text.isEmpty) throw Exception('没有识别到文字，录音已保留，请重试');
           turn['text'] = text;
@@ -1768,7 +1779,15 @@ class _FreeChatPageState extends State<FreeChatPage>
       };
       await savePending(turn);
       var text = '';
-      final connected = await (connecting ?? Future.value(false));
+      final android = defaultTargetPlatform == TargetPlatform.android;
+      final connection = connecting ?? Future.value(false);
+      final connected = await (android
+          ? connection.timeout(
+              const Duration(seconds: 2),
+              onTimeout: () => false,
+            )
+          : connection);
+      if (android && !connected) voiceFailed = true;
       if (connected && !voiceFailed) {
         try {
           socket?.add(
@@ -1782,14 +1801,18 @@ class _FreeChatPageState extends State<FreeChatPage>
             }),
           );
           text = (await socketFinal!.future.timeout(
-            const Duration(seconds: 5),
-            onTimeout: () => transcript.text,
+            Duration(seconds: android ? 3 : 5),
+            onTimeout: () {
+              if (!android) return transcript.text;
+              voiceFailed = true;
+              return '';
+            },
           )).trim();
         } catch (_) {
           voiceFailed = true;
         }
       }
-      if (text.isEmpty) {
+      if (text.isEmpty && !(android && voiceFailed)) {
         if (mounted) {
           setState(
             () => voiceError = voiceFailed ? '语音连接中断，录音已保留。' : '没有识别到内容，录音已保留。',
