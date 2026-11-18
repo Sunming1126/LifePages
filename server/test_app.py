@@ -24,6 +24,28 @@ def wav():
 
 
 class FlowTest(unittest.IsolatedAsyncioTestCase):
+    async def test_streaming_model_reuses_client_until_api_shutdown(self):
+        prompts = []
+
+        def reply(request):
+            prompts.append(json.loads(request.content)['messages'][-1]['content'])
+            return httpx.Response(200, text=(
+                'data: {"choices":[{"delta":{"content":"收到"},"finish_reason":"stop"}]}\n'
+                'data: [DONE]\n'
+            ))
+
+        provider = httpx.AsyncClient(transport=httpx.MockTransport(reply))
+        config = ('test-key', 'https://model.example.test/v1', 'test-model')
+        with patch.object(backend, 'read_llm_config', return_value=config), \
+                patch.object(backend.httpx, 'AsyncClient', return_value=provider) as client_factory:
+            async with backend.lifespan(backend.app):
+                for prompt in ('虚构测试一', '虚构测试二'):
+                    self.assertEqual([text async for text in backend.stream_llm('测试', prompt)], ['收到'])
+                    self.assertFalse(provider.is_closed)
+            client_factory.assert_called_once()
+        self.assertTrue(provider.is_closed)
+        self.assertEqual(prompts, ['虚构测试一', '虚构测试二'])
+
     async def test_bailian_chapter_json_requests_disable_thinking(self):
         def reply(request):
             body = json.loads(request.content)

@@ -13,7 +13,7 @@ import time
 import uuid
 import wave
 import weakref
-from contextlib import aclosing, closing
+from contextlib import AsyncExitStack, aclosing, asynccontextmanager, closing
 from contextvars import ContextVar
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -39,7 +39,21 @@ DATA.chmod(0o700)
 (DATA / 'accounts').mkdir(exist_ok=True, mode=0o700)
 ACCOUNT = ContextVar('lifepages_account', default=None)
 REGISTRY = DATA / 'registry.sqlite3'
-app = FastAPI(title='LifePages API', docs_url=None, redoc_url=None)
+
+
+@asynccontextmanager
+async def lifespan(app):
+    # Keep the upstream TLS connection available between chat turns.
+    limits = httpx.Limits(max_connections=100, max_keepalive_connections=20, keepalive_expiry=60)
+    async with httpx.AsyncClient(timeout=45, limits=limits) as client:
+        app.state.streaming_llm_client = client
+        try:
+            yield
+        finally:
+            del app.state.streaming_llm_client
+
+
+app = FastAPI(title='LifePages API', docs_url=None, redoc_url=None, lifespan=lifespan)
 
 
 def registry():
@@ -242,7 +256,10 @@ async def stream_llm(system, context):
     if model == 'qwen3.7-flash' and urlparse(base).hostname == 'dashscope.aliyuncs.com':
         body['enable_thinking'] = False
     try:
-        async with httpx.AsyncClient(timeout=45) as client:
+        async with AsyncExitStack() as stack:
+            client = getattr(app.state, 'streaming_llm_client', None)
+            if client is None:
+                client = await stack.enter_async_context(httpx.AsyncClient(timeout=45))
             async with client.stream('POST', base + '/chat/completions',
                                      headers={'Authorization': f'Bearer {key}'}, json=body) as response:
                 # Read the non-streaming error body for quota details.
