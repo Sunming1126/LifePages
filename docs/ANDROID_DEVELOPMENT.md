@@ -102,3 +102,6 @@ Android 模拟器、Android 真机和 iOS 的结果必须分开记录。暂不�
 - 修复后的 `flutter analyze --no-pub` 无问题，`flutter test --no-pub` 42 项通过。Release 的 Java/R8 压缩因锁定 RTC 包引用未提供的可选厂商/JSON 类而失败；安卓构建独立提交 `7b20af6` 关闭 Java 压缩和资源裁剪，保留 JNI/反射代码及现有依赖，Dart 仍使用 Release AOT。APK 使用原本机测试签名，非商店签名。
 - 最终交付使用正常 `lib/main.dart` 入口：`flutter build apk --release --no-pub --target-platform android-arm64 --build-number 4 -t lib/main.dart`。文件 `output/LifePages-Android-ARM64-20261117-v4.apk`，61,241,662 字节（58.4 MiB），SHA256 `ad62db8fea4f9c8687d0fda0de02d4003641211c2309d5fe8cc8867447b22033`。包名 `com.caoyuming.lifepages`，0.1.0 / versionCode 4，Android 7.0/API 24 起，ARM64；APK v2 签名校验通过。
 - 最终 Release 包在模拟器覆盖安装成功、保留原虚构书稿。再次关闭双网络并强制结束重启，首帧 1.954 秒；安装后的首次启动 11.506 秒，故不据此承诺所有设备均 2 秒启动。断网输入 `Fictional offline draft.`，联网刷新后输入仍在；发送后收到新回复并自动启动语音播放。模拟器网络已恢复。截图/XML 等验收产物留在忽略的 `artifacts/`，APK/测试虚拟环境位于忽略的 `output/`。
+# 2026-11-18 登录接入范围
+
+安卓分支基于 `d5383e9`，本次计划修改 `android/` 的 Google Services 插件配置及共享的 `lib/account/social_sign_in.dart` 和相关测试；邮箱验证码、密码、注册、重设密码继续调用既有服务端接口。Firebase 本机配置不提交；等待安卓签名登记后的 JSON、Apple Services ID 与回调核对、专用测试账号和 Mac 双端验收。无需修改 iOS 原生工程或生产后端。
