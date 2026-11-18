@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'package:flutter/foundation.dart' show defaultTargetPlatform;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -210,29 +209,21 @@ class _AccountLoginState extends State<_AccountLogin> {
     },
   );
 
-  List<Widget> _socialButtons() =>
-      defaultTargetPlatform == TargetPlatform.android
-      ? []
-      : [
-          for (final provider in SocialSignIn.values) ...[
-            if (provider == SocialSignIn.google) const SizedBox(height: 10),
-            _SocialAuthButton(
-              provider: provider,
-              label: widget.link
-                  ? '绑定 ${provider.label}'
-                  : '使用 ${provider.label} 登录',
-              loading:
-                  _action ==
-                  (provider == SocialSignIn.apple
-                      ? _Action.apple
-                      : _Action.google),
-              onPressed:
-                  SocialSignIn.available && !_busy && (widget.link || _enabled)
-                  ? () => _social(provider)
-                  : null,
-            ),
-          ],
-        ];
+  List<Widget> _socialButtons() => [
+    for (final provider in SocialSignIn.values) ...[
+      if (provider == SocialSignIn.google) const SizedBox(height: 10),
+      _SocialAuthButton(
+        provider: provider,
+        label: widget.link ? '绑定 ${provider.label}' : '使用 ${provider.label} 登录',
+        loading:
+            _action ==
+            (provider == SocialSignIn.apple ? _Action.apple : _Action.google),
+        onPressed: SocialSignIn.available && !_busy && (widget.link || _enabled)
+            ? () => _social(provider)
+            : null,
+      ),
+    ],
+  ];
 
   void _clearMessage(String _) {
     if (_message != null) setState(() => _message = null);
