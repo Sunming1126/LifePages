@@ -105,3 +105,9 @@ Android 模拟器、Android 真机和 iOS 的结果必须分开记录。暂不�
 # 2026-11-18 登录接入范围
 
 安卓分支基于 `d5383e9`，本次计划修改 `android/` 的 Google Services 插件配置及共享的 `lib/account/social_sign_in.dart` 和相关测试；邮箱验证码、密码、注册、重设密码继续调用既有服务端接口。Firebase 本机配置不提交；等待安卓签名登记后的 JSON、Apple Services ID 与回调核对、专用测试账号和 Mac 双端验收。无需修改 iOS 原生工程或生产后端。
+
+已将远端配置提交 `1b8c7fa` 合入本地 `android`（合并提交 `f2126ed`，共同基线 `c67693a`）。确认项目 `lifepages-980b0`、包名 `com.caoyuming.lifepages`、Web OAuth 客户端和匹配 APK 证书的 Android OAuth 客户端。Apple 配置按项目方提供的 `com.caoyuming.lifePages.signin` 和 `https://lifepages-980b0.firebaseapp.com/__/auth/handler` 核对格式，Android 继续使用 `AppleAuthProvider` 和线上 `https://onesay.top/lifepages`。
+
+- `bd041ad` 移除 Android 登录页隐藏按钮的判断，复用 iOS 的 Apple 和 Google 按钮样式。API 36 模拟器显示四种登录入口，Google 可打开系统授权页并返回取消。Apple 启动 Firebase `GenericIdpActivity`，本次模拟器未到达 Apple 网页，结束进程后重新打开登录页。四种方式的线上成功登录、退出、重启恢复和同一已绑定账号的双端书架对照待实测。
+- `f28b5d5` 限制 Android 松手后等待实时转写连接及结果的时间。在实时连接中断或未返回完整结果时，用保留的 WAV 调用现有 `/api/transcribe`，随后发送文字和原录音。转写超时提示重试，录音留在待发记录。Android 回归测试模拟实时结果未返回并验证备用转写和原录音随同一次请求发送。真机语音耗时待测。
+- ARM64 Release 安装包 `output/LifePages-Android-ARM64-20261118-v7.apk`（versionCode 7），已覆盖安装到 `emulator-5554`。实际签名为原本机 Android Debug 测试签名。证书 SHA-1 为 `73:BA:AA:17:89:49:A6:25:3D:88:60:B9:40:FB:BF:7F:65:78:0E:49`，SHA-256 为 `CF:2B:1B:90:30:12:B7:02:7E:43:0E:AB:FC:8A:B0:4F:B6:66:AD:66:71:B6:0E:BD:D1:4C:CA:C5:0D:D5:D0:FC`。`apksigner` 验证通过，APK 内包含 Google Services 生成的资源。Mac 冒烟验收待执行。
