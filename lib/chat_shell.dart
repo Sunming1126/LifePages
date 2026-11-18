@@ -729,12 +729,54 @@ class _FreeChatPageState extends State<FreeChatPage>
   String? pcmPath;
   String? wavPath;
   bool voiceFailed = false;
+  int _warmEpoch = 0;
+
+  Future<void> _preconnectReplyAudio() async {
+    if (!Platform.isAndroid ||
+        !widget.active ||
+        !_foreground ||
+        !automaticReplyAudio.value ||
+        _offline) {
+      return;
+    }
+    final epoch = ++_warmEpoch;
+    try {
+      if (await secure.read(key: replyConsentKey(widget.personId)) != 'yes') {
+        return;
+      }
+      final voice = await ReplyVoice.load();
+      if (mounted && epoch == _warmEpoch) {
+        await _replyPlayer.preconnect(
+          widget.personId,
+          chatApi.call,
+          voiceId: voice.name,
+        );
+      }
+    } catch (_) {
+      // A failed preconnection must not prevent chat or normal playback.
+    }
+  }
+
+  void _releaseReplyRoom({Duration grace = Duration.zero}) {
+    _warmEpoch++;
+    if (Platform.isAndroid) _replyPlayer.releaseWarm(grace: grace);
+  }
+
+  void _replyAudioRevoked() {
+    _releaseReplyRoom();
+    unawaited(_stopReply());
+  }
+
+  void _replyVoiceChanged() => unawaited(_preconnectReplyAudio());
 
   void _automaticAudioChanged() {
     if (!automaticReplyAudio.value) {
       final turn = _sendingTurn;
       if (turn != null) turn['muted'] = true;
       unawaited(_stopReply());
+      _releaseReplyRoom();
+    } else {
+      unawaited(_preconnectReplyAudio());
     }
   }
 
@@ -744,17 +786,23 @@ class _FreeChatPageState extends State<FreeChatPage>
     WidgetsBinding.instance.addObserver(this);
     if (Platform.isAndroid) {
       automaticReplyAudio.addListener(_automaticAudioChanged);
+      replyAudioConsentRevision.addListener(_replyAudioRevoked);
+      replyVoiceRevision.addListener(_replyVoiceChanged);
     }
     load();
     unawaited(warmVoice());
+    unawaited(_preconnectReplyAudio());
   }
 
   @override
   void dispose() {
     automaticReplyAudio.removeListener(_automaticAudioChanged);
+    replyAudioConsentRevision.removeListener(_replyAudioRevoked);
+    replyVoiceRevision.removeListener(_replyVoiceChanged);
     WidgetsBinding.instance.removeObserver(this);
     _replyEpoch++;
     unawaited(_replyPlayer.stop());
+    _releaseReplyRoom();
     _replyPlayer.clearCache();
     voiceEpoch++;
     cancelledVoice = true;
@@ -777,9 +825,11 @@ class _FreeChatPageState extends State<FreeChatPage>
     if (oldWidget.active && !widget.active) {
       inputFocus.unfocus();
       unawaited(_stopReply());
+      _releaseReplyRoom(grace: const Duration(seconds: 10));
       if (pointerDown) unawaited(finishVoice(cancel: true));
     }
     if (!oldWidget.active && widget.active) {
+      unawaited(_preconnectReplyAudio());
       WidgetsBinding.instance.addPostFrameCallback((_) => _sendQueuedVoice());
     }
   }
@@ -801,8 +851,13 @@ class _FreeChatPageState extends State<FreeChatPage>
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     _foreground = state == AppLifecycleState.resumed;
-    if (!_foreground) unawaited(_stopReply());
-    if (_foreground) _sendQueuedVoice();
+    if (!_foreground) {
+      unawaited(_stopReply());
+      _releaseReplyRoom();
+    } else {
+      unawaited(_preconnectReplyAudio());
+      _sendQueuedVoice();
+    }
     if (state != AppLifecycleState.resumed && (starting || recording)) {
       pointerDown = false;
       cancelZone = true;
@@ -1006,7 +1061,10 @@ class _FreeChatPageState extends State<FreeChatPage>
     } finally {
       if (mounted) setState(() => loading = false);
     }
-    if (_topicLoadError == null && !_offline) _sendQueuedVoice();
+    if (mounted && _topicLoadError == null && !_offline) {
+      unawaited(_preconnectReplyAudio());
+      _sendQueuedVoice();
+    }
   }
 
   List<BookRecord> _decodeTopics(dynamic state) => (state['topics'] as List)
@@ -1409,6 +1467,7 @@ class _FreeChatPageState extends State<FreeChatPage>
         return false;
       }
       await secure.write(key: key, value: 'yes');
+      unawaited(_preconnectReplyAudio());
       return true;
     } finally {
       _allowReplyAudioPrompt = false;
