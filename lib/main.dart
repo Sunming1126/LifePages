@@ -103,6 +103,8 @@ class ApiFailure implements Exception {
   String toString() => '$message';
 }
 
+typedef PendingVoiceUpload = ({String path, bool blocked});
+
 class Api {
   Api({http.Client? client, ReadCache? cache, bool? offlineReads})
     : _client = client ?? http.Client(),
@@ -111,6 +113,7 @@ class Api {
   final http.Client _client;
   final ReadCache _cache;
   final bool offlineReads;
+  static const _voiceUploads = MethodChannel('life_pages/voice_uploads');
   String get _scope => '$base\u0000$token';
   Future<dynamic> readSnapshot(String path) async =>
       offlineReads && token.isNotEmpty ? _cache.read(_scope, path) : null;
@@ -191,7 +194,7 @@ class Api {
         response,
       ).timeout(const Duration(seconds: 15));
       // A client installed before its server is upgraded can still send turns.
-      if (response.statusCode == 404) {
+      if (response.statusCode == 404 && path.endsWith('/turns')) {
         final reply = await call('POST', path, body) as Map;
         yield {'type': 'done', ...Map<String, dynamic>.from(reply)};
         return;
@@ -207,6 +210,47 @@ class Api {
       if (line.isNotEmpty) yield jsonDecode(line) as Map<String, dynamic>;
     }
   }
+
+  Future<String> enqueueVoiceUpload({
+    required String book,
+    required String message,
+    required String request,
+    required String path,
+  }) async => (await _voiceUploads.invokeMethod<String>('enqueue', {
+    'base': base,
+    'token': token,
+    'book': book,
+    'message': message,
+    'request': request,
+    'path': path,
+  }))!;
+
+  Future<Map<String, PendingVoiceUpload>> pendingVoiceUploads(
+    String book,
+  ) async {
+    final uploads = await _voiceUploads.invokeMapMethod<String, dynamic>(
+      'pending',
+      {'base': base, 'book': book},
+    );
+    return {
+      for (final entry in (uploads ?? const <String, dynamic>{}).entries)
+        entry.key: (
+          path: entry.value['path'] as String,
+          blocked: entry.value['blocked'] == true,
+        ),
+    };
+  }
+
+  Future<void> retryVoiceUpload(String book, String message) =>
+      _voiceUploads.invokeMethod<void>('retry', {
+        'base': base,
+        'token': token,
+        'book': book,
+        'message': message,
+      });
+
+  Future<void> pauseVoiceUploads(String book) =>
+      _voiceUploads.invokeMethod<void>('pause', {'base': base, 'book': book});
 
   Future<String> audio(String id) async {
     final response = await http.get(
@@ -984,7 +1028,8 @@ class _PersonPageState extends State<PersonPage> {
 class AudioButton extends StatefulWidget {
   final String id;
   final Api? client;
-  const AudioButton({super.key, required this.id, this.client});
+  final String? localPath;
+  const AudioButton({super.key, required this.id, this.client, this.localPath});
   @override
   State<AudioButton> createState() => _AudioButtonState();
 }
@@ -1005,9 +1050,12 @@ class _AudioButtonState extends State<AudioButton> {
         : () async {
             setState(() => busy = true);
             try {
-              await (player ??= AudioPlayer()).play(
-                DeviceFileSource(await (widget.client ?? api).audio(widget.id)),
-              );
+              final path = widget.localPath;
+              final source = path != null && await File(path).exists()
+                  ? path
+                  : await (widget.client ?? api).audio(widget.id);
+              if (!mounted) return;
+              await (player ??= AudioPlayer()).play(DeviceFileSource(source));
             } catch (e) {
               if (context.mounted) showError(context, e);
             } finally {
@@ -1568,6 +1616,7 @@ class BookPage extends StatefulWidget {
   final Api? client;
   final List<Map<String, dynamic>> chapters;
   final VoidCallback? onChaptersChanged;
+  final bool interview;
   const BookPage({
     super.key,
     required this.name,
@@ -1577,6 +1626,7 @@ class BookPage extends StatefulWidget {
     this.client,
     this.bookId,
     this.onChaptersChanged,
+    this.interview = false,
   });
 
   @override
@@ -1612,7 +1662,8 @@ class _BookPageState extends State<BookPage> {
           : (await client
                         .call(
                           'GET',
-                          '/api/books/$id/chapters?include_material=true',
+                          '/api/books/$id/chapters?include_material=true'
+                              '${widget.interview ? '&interview_only=true' : ''}',
                         )
                         .timeout(const Duration(seconds: 15))
                     as List)
@@ -1799,7 +1850,7 @@ class _BookPageState extends State<BookPage> {
   }
 
   String _chapterLabel(Map<String, dynamic> chapter, int index) {
-    if (widget.title == null) return '第 ${index + 1} 章';
+    if (widget.interview || widget.title == null) return '第 ${index + 1} 章';
     final number = chapter['topic_number'];
     return number == null ? '原有章节' : '第 $number 章';
   }
@@ -1825,8 +1876,10 @@ class _BookPageState extends State<BookPage> {
         context: context,
         builder: (sheet) => ChatSheetDialog(
           title: const Text('制作这本回忆录'),
-          content: const Text(
-            'AI 会整理未成稿的章节，已有正文会保留。PDF 的原声二维码可查看整章内容和对应提问，并收听录音。',
+          content: Text(
+            widget.interview
+                ? '用已保存的书稿生成 PDF。含原声的章节会附上二维码，可查看整章内容并收听录音。'
+                : 'AI 会整理未成稿的章节，已有正文会保留。PDF 的原声二维码可查看整章内容和对应提问，并收听录音。',
           ),
           actions: [
             TextButton(
@@ -1909,12 +1962,15 @@ class _BookPageState extends State<BookPage> {
     final exportChapters = <Map<String, dynamic>>[];
     for (final (index, chapter) in body.indexed) {
       final blocks = _blocks(chapter);
+      final url = widget.interview && !_hasAudio(chapter)
+          ? ''
+          : urls[chapter['id']] ?? '';
       exportChapters.add({
         'title': chapter['title'],
         'content': chapter['content'],
-        'url': urls[chapter['id']] ?? '',
+        'url': url,
         if (defaultTargetPlatform == TargetPlatform.android)
-          'qr': bookQrModules(urls[chapter['id']] ?? ''),
+          'qr': bookQrModules(url),
         'label': _chapterLabel(chapter, index),
         if (blocks.any((block) => block['kind'] == 'image'))
           'blocks': [

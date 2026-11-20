@@ -82,6 +82,10 @@ class Wire extends VoiceWire {
 
 class ChatApi extends Api {
   final turns = <Map<String, dynamic>>[];
+  final turnPaths = <String>[];
+  final queuedOriginals = <String>[];
+  bool supportsDeferredAudio = false;
+  Completer<String>? nativeQueue;
   String? fallbackAudio;
   List<dynamic> history = [];
   final topics = [
@@ -108,6 +112,24 @@ class ChatApi extends Api {
   bool emitSpeech = false;
   final refreshRequests = <String>[];
   int topicRequests = 0, historyRequests = 0;
+  @override
+  Future<String> enqueueVoiceUpload({
+    required String book,
+    required String message,
+    required String request,
+    required String path,
+  }) async {
+    queuedOriginals.add(path);
+    expect(message, 'user-1');
+    expect(request, turns.single['request_id']);
+    return nativeQueue!.future;
+  }
+
+  @override
+  Future<Map<String, PendingVoiceUpload>> pendingVoiceUploads(
+    String book,
+  ) async => {};
+
   @override
   Stream<Map<String, dynamic>> streamTurn(
     String path,
@@ -151,7 +173,11 @@ class ChatApi extends Api {
     if (uri.path.endsWith('/topics')) {
       topicRequests++;
       await topicBlock?.future;
-      return {'active_id': activeSession, 'topics': topics};
+      return {
+        'active_id': activeSession,
+        'topics': topics,
+        if (supportsDeferredAudio) 'deferred_voice_upload': true,
+      };
     }
     if (method == 'PUT' && uri.path.endsWith('/active')) {
       await activationBlock?.future;
@@ -174,7 +200,8 @@ class ChatApi extends Api {
         'chapters': [],
       };
     }
-    if (path.endsWith('/turns')) {
+    if (path.endsWith('/turns') || path.endsWith('/voice-turns')) {
+      turnPaths.add(path);
       turns.add(Map<String, dynamic>.from(body!));
       await responseBlock?.future;
       final id = body['session_id'] as String? ?? 'p';
@@ -190,7 +217,13 @@ class ChatApi extends Api {
         },
         {'id': 'ai-${turns.length}', 'role': 'assistant', 'text': '我在听。'},
       ]);
-      return {'text': '我在听。'};
+      return {
+        'text': '我在听。',
+        if (path.endsWith('/voice-turns')) ...{
+          'user_id': 'user-${turns.length}',
+          'assistant_id': 'ai-${turns.length}',
+        },
+      };
     }
     throw StateError('Unexpected API request $path');
   }
@@ -535,6 +568,46 @@ void main() {
         utf8.decode(base64Decode(api.fallbackAudio!).take(4).toList()),
         'RIFF',
       );
+    },
+    variant: TargetPlatformVariant.only(TargetPlatform.android),
+  );
+
+  testWidgets(
+    'Android displays the streamed reply before native audio upload',
+    (tester) async {
+      api.supportsDeferredAudio = true;
+      api.firstChunk = Completer<String>();
+      api.responseBlock = Completer<void>();
+      api.nativeQueue = Completer<String>();
+      await tester.pumpWidget(harness());
+      await flush(tester);
+      final gesture = await hold(tester);
+      capture.audio.add(List<int>.filled(3200, 1));
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 650)),
+      );
+      await gesture.up();
+      await flush(tester);
+      api.firstChunk!.complete('先收到文字');
+      for (var i = 0; i < 5 && api.turns.isEmpty; i++) {
+        await flush(tester);
+      }
+      expect(api.turnPaths.single, '/api/people/p/voice-turns');
+      expect(api.turns.single['payload_hash'], matches(r'^[0-9a-f]{64}$'));
+      expect(api.turns.single.containsKey('audio_base64'), isFalse);
+      expect(find.text('先收到文字'), findsOneWidget);
+      expect(api.queuedOriginals, isEmpty);
+
+      api.responseBlock!.complete();
+      for (var i = 0; i < 5 && api.queuedOriginals.isEmpty; i++) {
+        await flush(tester);
+      }
+      expect(find.text('我在听。'), findsOneWidget);
+      expect(File(api.queuedOriginals.single).existsSync(), isTrue);
+      api.nativeQueue!.complete('${dir.path}/native.wav');
+      await flush(tester);
+      expect(File(api.queuedOriginals.single).existsSync(), isFalse);
+      await tester.pumpWidget(const SizedBox.shrink());
     },
     variant: TargetPlatformVariant.only(TargetPlatform.android),
   );

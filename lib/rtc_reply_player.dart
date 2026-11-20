@@ -6,6 +6,9 @@ import 'dart:typed_data';
 import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter/services.dart' show MissingPluginException;
 import 'package:volc_engine_rtc/volc_engine_rtc.dart';
+import 'package:volc_engine_rtc/codegen/pack/api.dart'
+    as rtc_native
+    show RTCEngine;
 
 import 'wav.dart';
 
@@ -548,10 +551,20 @@ class _RtcConnection {
       // Continue destroying native resources and closing the server session.
     } finally {
       try {
-        room?.destroy();
+        if (Platform.isAndroid) {
+          await room?.destroy();
+        } else {
+          room?.destroy();
+        }
       } catch (_) {}
       try {
-        engine?.destroy();
+        if (Platform.isAndroid && engine != null) {
+          // The public instance wrapper returns void and drops this Future.
+          // Wait for native teardown before the serialized queue creates a room.
+          await rtc_native.RTCEngine.destroyRTCEngine();
+        } else {
+          engine?.destroy();
+        }
       } catch (_) {}
     }
   }

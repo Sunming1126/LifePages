@@ -759,6 +759,7 @@ class _AIPrivacyPageState extends State<_AIPrivacyPage> {
         final id = book['id'] as String;
         await secure.delete(key: aiConsentKey(id));
         await secure.delete(key: replyConsentKey(id));
+        if (Platform.isAndroid) await widget.client.pauseVoiceUploads(id);
         replyAudioConsentRevision.value++;
       }
       if (mounted) showError(context, '已撤回本机的聊天、转写与播报授权');

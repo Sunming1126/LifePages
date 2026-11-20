@@ -13,6 +13,7 @@ import 'dart:ui' show ImageFilter;
 import 'package:flutter/foundation.dart' show defaultTargetPlatform;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:crypto/crypto.dart';
 import 'package:liquid_glass_widgets/liquid_glass_widgets.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:record/record.dart';
@@ -26,6 +27,7 @@ import 'chatchat_style.dart';
 import 'my_page.dart';
 import 'reading_preferences.dart';
 import 'legal_urls.dart';
+import 'interview_draft.dart';
 
 class ChatShell extends StatefulWidget {
   const ChatShell({
@@ -54,6 +56,7 @@ class _ChatShellState extends State<ChatShell> {
   String? _createFingerprint, _createId;
   Api get _api => widget.client ?? api;
   bool _loading = true, _busy = false;
+  bool _interviewAvailable = false;
   int _tab = 0, _shelfEpoch = 0;
   PageBackground _background = PageBackground.paperTone;
   bool _backgroundChosen = false;
@@ -96,6 +99,10 @@ class _ChatShellState extends State<ChatShell> {
   }
 
   void _applyRecords(dynamic state) {
+    _interviewAvailable = state['interview_version'] != null;
+    final previousInterview = _books
+        .where((book) => book['id'] == _activeId)
+        .firstOrNull?['interview_version'];
     unawaited(_api.writeSnapshot('/api/books', state));
     _books = List<BookRecord>.from(
       (state['books'] as List).map(
@@ -107,6 +114,12 @@ class _ChatShellState extends State<ChatShell> {
         (row) => Map<String, dynamic>.from(row as Map),
       ),
     );
+    final nextInterview = _books
+        .where((book) => book['id'] == _activeId)
+        .firstOrNull?['interview_version'];
+    if (previousInterview != nextInterview) {
+      _chatKey = GlobalKey<_FreeChatPageState>();
+    }
   }
 
   void _apply(dynamic state) {
@@ -219,7 +232,11 @@ class _ChatShellState extends State<ChatShell> {
 
   Future<void> _create() async {
     if (!_canChangeBook) return;
-    final data = await newBookSheet(context, _api);
+    final data = await newBookSheet(
+      context,
+      _api,
+      interview: _interviewAvailable,
+    );
     if (mounted && data != null) {
       final fingerprint = jsonEncode(data);
       if (_createFingerprint != fingerprint || _createId == null) {
@@ -363,7 +380,7 @@ class _ChatShellState extends State<ChatShell> {
     unawaited(_refreshCounts());
     if (_activeId != bookId) return;
     final chat = _chatKey.currentState;
-    if (chat != null) {
+    if (chat != null && !chat.widget.interview) {
       unawaited(chat._refreshTopics(afterEdit: true).catchError((_) {}));
     }
   }
@@ -446,6 +463,7 @@ class _ChatShellState extends State<ChatShell> {
                         key: _chatKey,
                         personId: book['id'] as String,
                         bookTitle: book['title'] as String,
+                        interview: book['interview_version'] != null,
                         bookDrafts: _drafts.putIfAbsent(
                           book['id'] as String,
                           () => {},
@@ -466,6 +484,7 @@ class _ChatShellState extends State<ChatShell> {
                         busy: _busy,
                         documentsDirectory: widget.documentsDirectory,
                         onCreate: _create,
+                        onContinue: _continue,
                         onRecentlyDeleted: () => showRecentlyDeleted(
                           context,
                           books: _trash,
@@ -633,7 +652,9 @@ class FreeChatPage extends StatefulWidget {
     this.voiceConnector,
     this.client,
     this.documentsDirectory,
+    this.interview = false,
   });
+  final bool interview;
   @override
   State<FreeChatPage> createState() => _FreeChatPageState();
 }
@@ -663,6 +684,11 @@ class _FreeChatPageState extends State<FreeChatPage>
   final _chapterHistory = <String, List<dynamic>>{};
   List<dynamic> get messages => _chapterHistory[_session] ?? const [];
   final _outbox = <Map<String, dynamic>>[];
+  final _handingOffOriginals = <Map<String, dynamic>>{};
+  Map<String, PendingVoiceUpload> _pendingOriginals = const {};
+  Timer? _originalStatusTimer;
+  bool _checkingOriginals = false;
+  bool _deferredVoice = false;
   Map<String, dynamic>? _sendingTurn;
   String? _voiceAfter;
   Future<void> _outboxWrite = Future.value();
@@ -676,6 +702,10 @@ class _FreeChatPageState extends State<FreeChatPage>
   Future<void>? _topicsRequest;
   bool _topicsSheetOpen = false;
   String get _topicsPath => '/api/books/${widget.personId}/topics';
+  String get _interviewPath => '/api/books/${widget.personId}/interview';
+  Map<String, dynamic>? _interview;
+  List<Map<String, dynamic>> get _visibleOutbox =>
+      (widget.interview ? _outbox : _sessionOutbox).toList();
   BookRecord? get _topic =>
       _topics.where((row) => row['id'] == _session).firstOrNull;
 
@@ -685,6 +715,8 @@ class _FreeChatPageState extends State<FreeChatPage>
       turn['session_id'] as String? ?? widget.personId;
   Iterable<Map<String, dynamic>> get _sessionOutbox =>
       _outbox.where((turn) => _turnSession(turn) == _session);
+  bool _onlyOriginal(Map<String, dynamic> turn) =>
+      turn['audio_message_id'] is String;
   bool get _chatBusy =>
       loading ||
       sending ||
@@ -697,7 +729,10 @@ class _FreeChatPageState extends State<FreeChatPage>
   bool get _canSend =>
       _sessionId != null && !_chatBusy && !_chapterLoadFailed && !_offline;
   bool get _canSubmitText =>
-      _canSend && !_sessionOutbox.any((turn) => turn['after_request'] != null);
+      _canSend &&
+      !_sessionOutbox.any(
+        (turn) => !_onlyOriginal(turn) && turn['after_request'] != null,
+      );
 
   bool loading = true,
       sending = false,
@@ -804,6 +839,7 @@ class _FreeChatPageState extends State<FreeChatPage>
     unawaited(_replyPlayer.stop());
     _releaseReplyRoom();
     _replyPlayer.clearCache();
+    _originalStatusTimer?.cancel();
     voiceEpoch++;
     cancelledVoice = true;
     recordLimit?.cancel();
@@ -830,6 +866,7 @@ class _FreeChatPageState extends State<FreeChatPage>
     }
     if (!oldWidget.active && widget.active) {
       unawaited(_preconnectReplyAudio());
+      unawaited(_syncOriginals());
       WidgetsBinding.instance.addPostFrameCallback((_) => _sendQueuedVoice());
     }
   }
@@ -856,6 +893,7 @@ class _FreeChatPageState extends State<FreeChatPage>
       _releaseReplyRoom();
     } else {
       unawaited(_preconnectReplyAudio());
+      unawaited(_syncOriginals());
       _sendQueuedVoice();
     }
     if (state != AppLifecycleState.resumed && (starting || recording)) {
@@ -937,7 +975,11 @@ class _FreeChatPageState extends State<FreeChatPage>
 
   bool _waitingForEarlierTurn(Map<String, dynamic> turn) =>
       turn['after_request'] != null &&
-      _outbox.any((earlier) => earlier['request_id'] == turn['after_request']);
+      _outbox.any(
+        (earlier) =>
+            !_onlyOriginal(earlier) &&
+            earlier['request_id'] == turn['after_request'],
+      );
 
   void _sendQueuedVoice() {
     if (!mounted ||
@@ -952,6 +994,7 @@ class _FreeChatPageState extends State<FreeChatPage>
           (turn) =>
               turn['queued'] == true &&
               turn['failed'] != true &&
+              !_onlyOriginal(turn) &&
               !_waitingForEarlierTurn(turn),
         )
         .firstOrNull;
@@ -959,6 +1002,10 @@ class _FreeChatPageState extends State<FreeChatPage>
   }
 
   Future<void> retryTurn(Map<String, dynamic> turn) async {
+    if (_onlyOriginal(turn)) {
+      if (await consent(context, widget.personId)) await _queueOriginal(turn);
+      return;
+    }
     if (_chatBusy) {
       showError(context, '正在处理当前消息，请稍等');
       return;
@@ -977,12 +1024,24 @@ class _FreeChatPageState extends State<FreeChatPage>
   bool _outboxLoaded = false;
   bool _offline = false;
   String? _topicLoadError;
-  String get _openingCacheKey => 'chat-opening:${widget.personId}';
+  String get _openingCacheKey =>
+      '${widget.interview ? 'interview-opening' : 'chat-opening'}:${widget.personId}';
   Future<void> _saveOpening() => chatApi.writeSnapshot(_openingCacheKey, {
     'active_id': _sessionId,
     'topics': _topicUpdates.value,
     'messages': messages,
+    if (widget.interview) 'interview': _interview,
   });
+
+  void _readInterview(dynamic state) {
+    if (state is Map && mounted) {
+      final next = Map<String, dynamic>.from(state);
+      if ((next['revision'] as int) >=
+          (_interview?['revision'] as int? ?? -1)) {
+        setState(() => _interview = next);
+      }
+    }
+  }
 
   Future<void> load() async {
     if (_sessionId != null) _saveTextDraft();
@@ -1004,8 +1063,10 @@ class _FreeChatPageState extends State<FreeChatPage>
           _topicUpdates.value = topics;
           _chapterHistory[_session] = history;
           loading = false;
+          if (widget.interview) _offline = true;
         });
         restored = true;
+        if (widget.interview) _readInterview(saved['interview']);
       }
     } catch (_) {
       // Ignore obsolete snapshots and try the server.
@@ -1034,13 +1095,28 @@ class _FreeChatPageState extends State<FreeChatPage>
         }
         _outboxLoaded = true;
       }
-      final state = await chatApi.call('GET', _topicsPath);
+      final state = widget.interview
+          ? await chatApi
+                .call('POST', _interviewPath)
+                .timeout(
+                  Platform.isAndroid
+                      ? const Duration(seconds: 8)
+                      : const Duration(seconds: 15),
+                )
+          : await chatApi.call('GET', _topicsPath);
       if (!mounted) return;
+      _deferredVoice = state['deferred_voice_upload'] == true;
       final sid = state['active_id'] as String;
-      final loaded = await _activateTopic(sid);
+      final loaded = widget.interview
+          ? List<dynamic>.from(state['messages'] as List)
+          : await _activateTopic(sid);
       if (!mounted) return;
       _sessionId = sid;
-      _topicUpdates.value = _decodeTopics(state);
+      if (widget.interview) {
+        _readInterview(state['interview']);
+      } else {
+        _topicUpdates.value = _decodeTopics(state);
+      }
       _chapterHistory[sid] = loaded;
       _offline = false;
       unawaited(_saveOpening());
@@ -1063,6 +1139,10 @@ class _FreeChatPageState extends State<FreeChatPage>
     }
     if (mounted && _topicLoadError == null && !_offline) {
       unawaited(_preconnectReplyAudio());
+      unawaited(_syncOriginals());
+      for (final turn in _outbox.where(_onlyOriginal).toList()) {
+        unawaited(_queueOriginal(turn));
+      }
       _sendQueuedVoice();
     }
   }
@@ -1085,6 +1165,9 @@ class _FreeChatPageState extends State<FreeChatPage>
 
   Future<List<dynamic>> _messagesFor(String session) async {
     final p = await chatApi.call('GET', '$_personPath?session_id=$session');
+    if (widget.interview && session == _session) {
+      _readInterview(p['interview']);
+    }
     return List<dynamic>.from(p['messages']);
   }
 
@@ -1127,8 +1210,13 @@ class _FreeChatPageState extends State<FreeChatPage>
     });
   }
 
-  Future<void> sendText() async {
-    final text = input.text.trim();
+  Future<void> sendText({String? interviewAction}) async {
+    final text = switch (interviewAction) {
+      'begin' => '开始访谈',
+      'skip' => '跳过这题',
+      'next' => '下一题',
+      _ => input.text.trim(),
+    };
     if (text.isEmpty || !_canSubmitText) {
       return;
     }
@@ -1140,10 +1228,14 @@ class _FreeChatPageState extends State<FreeChatPage>
         'request_id': const Uuid().v4().replaceAll('-', ''),
         'session_id': _session,
         'text': text,
+        if (interviewAction != null) ...{
+          'interview_action': interviewAction,
+          'interview_revision': _interview!['revision'],
+        },
       };
       await savePending(turn);
       if (!mounted) return;
-      input.clear();
+      if (interviewAction == null) input.clear();
       setState(() => preparing = false);
       await _sendTurn(turn);
     } catch (e) {
@@ -1224,12 +1316,12 @@ class _FreeChatPageState extends State<FreeChatPage>
       var text = (turn['text'] as String? ?? '').trim();
       final path = turn['audio_path'] as String?;
       String? encoded;
+      String? payloadHash;
       if (path != null) {
         final audio = await File(path).readAsBytes();
-        encoded = base64Encode(audio);
         if (text.isEmpty) {
           final transcribe = chatApi.call('POST', '/api/transcribe', {
-            'audio_base64': encoded,
+            'audio_base64': base64Encode(audio),
           });
           // The fallback service streams the recording at roughly real-time pace.
           // Allow for its duration, plus connection and recognition overhead.
@@ -1243,15 +1335,36 @@ class _FreeChatPageState extends State<FreeChatPage>
           text = (transcribed['text'] as String? ?? '').trim();
           if (text.isEmpty) throw Exception('没有识别到文字，录音已保留，请重试');
           turn['text'] = text;
-          await savePending(turn);
+        }
+        // Freeze the transport before the first request. A retried old turn
+        // must keep its original audio contract even after a server upgrade.
+        final deferred =
+            turn['deferred_audio'] == true ||
+            (turn['submitted'] != true &&
+                defaultTargetPlatform == TargetPlatform.android &&
+                _deferredVoice);
+        if (deferred) {
+          turn['deferred_audio'] = true;
+          final digest = BytesBuilder(copy: false)
+            ..add(utf8.encode(text))
+            ..addByte(0)
+            ..add(audio);
+          payloadHash = sha256.convert(digest.takeBytes()).toString();
+        } else {
+          encoded = base64Encode(audio);
         }
       }
       final body = <String, dynamic>{
         'request_id': turn['request_id'],
         'session_id': _turnSession(turn),
         'text': text,
+        'audio_base64': ?encoded,
+        'payload_hash': ?payloadHash,
+        if (turn['interview_action'] != null) ...{
+          'interview_action': turn['interview_action'],
+          'interview_revision': turn['interview_revision'],
+        },
       };
-      if (encoded != null) body['audio_base64'] = encoded;
       turn['submitted'] = true;
       await savePending(turn);
       if (mounted) setState(() => awaitingReply = true);
@@ -1266,7 +1379,7 @@ class _FreeChatPageState extends State<FreeChatPage>
       }
       Map<String, dynamic>? reply;
       await for (final event in chatApi.streamTurn(
-        '$_personPath/turns',
+        '$_personPath/${payloadHash == null ? 'turns' : 'voice-turns'}',
         body,
         speak: speech != null,
       )) {
@@ -1288,6 +1401,9 @@ class _FreeChatPageState extends State<FreeChatPage>
             streamedSpeech = true;
             if (turn['muted'] != true) speech?.add(event['segment'] as int);
           case 'error':
+            if (event['status'] case final int status) {
+              throw ApiFailure(status, event['detail'] as String);
+            }
             throw Exception(event['detail']);
           case 'done':
             reply = event;
@@ -1295,6 +1411,9 @@ class _FreeChatPageState extends State<FreeChatPage>
         if (reply != null) break;
       }
       if (reply == null) throw Exception('AI 回复未完成，请点击重试。');
+      if (widget.interview && _turnSession(turn) == _session) {
+        _readInterview(reply['interview']);
+      }
       if (speech != null) unawaited(speech.close());
       if (!streamedSpeech && speech != null) unawaited(_stopReply());
       final assistantId = reply['assistant_id'] as String?;
@@ -1306,7 +1425,9 @@ class _FreeChatPageState extends State<FreeChatPage>
       if (mounted && _speakingReply == requestId) {
         setState(() => _speakingReply = assistantId);
       }
-      if (Platform.isAndroid && saved != null && reply['user_id'] is String) {
+      if ((widget.interview || Platform.isAndroid || payloadHash != null) &&
+          saved != null &&
+          reply['user_id'] is String) {
         // The stream's done event is sent after the server commits both messages.
         // Render that acknowledgement immediately instead of waiting for another GET.
         final session = _turnSession(turn);
@@ -1326,7 +1447,12 @@ class _FreeChatPageState extends State<FreeChatPage>
           }
         }
         _chapterHistory[session] = history;
-        await _removeTurn(turn);
+        if (payloadHash != null) {
+          turn['audio_message_id'] = reply['user_id'];
+          unawaited(_queueOriginal(turn));
+        } else {
+          await _removeTurn(turn);
+        }
         if (mounted) {
           setState(() {
             _streamText = '';
@@ -1335,7 +1461,13 @@ class _FreeChatPageState extends State<FreeChatPage>
         }
         unawaited(_saveOpening());
       } else {
+        if (payloadHash != null) throw StateError('语音消息确认不完整，请重试');
         await _refreshSentTurn(turn);
+      }
+      if (widget.interview && _turnSession(turn) != _session && mounted) {
+        final history = await _messagesFor(_session);
+        if (mounted) setState(() => _chapterHistory[_session] = history);
+        unawaited(_saveOpening());
       }
       if (!streamedSpeech &&
           turn['muted'] != true &&
@@ -1346,6 +1478,17 @@ class _FreeChatPageState extends State<FreeChatPage>
       if (speech != null) {
         unawaited(_stopReply());
         if (!speech.isClosed) unawaited(speech.close());
+      }
+      if (widget.interview &&
+          turn['interview_action'] != null &&
+          e is ApiFailure &&
+          e.status == 409) {
+        await _removeTurn(turn);
+        if (mounted) {
+          showError(context, e);
+          await load();
+        }
+        return;
       }
       turn['failed'] = true;
       try {
@@ -1367,6 +1510,88 @@ class _FreeChatPageState extends State<FreeChatPage>
     }
     if (replyToPlay != null && mounted) unawaited(_playReply(replyToPlay));
     _sendQueuedVoice();
+  }
+
+  Future<void> _queueOriginal(Map<String, dynamic> turn) async {
+    if (!_handingOffOriginals.add(turn)) return;
+    try {
+      await persistOutbox();
+      if (await secure.read(key: aiConsentKey(widget.personId)) != 'yes') {
+        return;
+      }
+      final id = turn['audio_message_id'] as String;
+      final path = await chatApi.enqueueVoiceUpload(
+        book: widget.personId,
+        message: id,
+        request: turn['request_id'] as String,
+        path: turn['audio_path'] as String,
+      );
+      if (mounted) {
+        setState(
+          () => _pendingOriginals = {
+            ..._pendingOriginals,
+            id: (path: path, blocked: false),
+          },
+        );
+        _originalStatusTimer?.cancel();
+        _originalStatusTimer = Timer(
+          const Duration(seconds: 4),
+          _syncOriginals,
+        );
+      }
+      await _removeTurn(turn);
+    } catch (_) {
+      if (mounted) showError(context, '回复已送达，原声已保留，请重试上传');
+    } finally {
+      _handingOffOriginals.remove(turn);
+    }
+  }
+
+  Future<void> _syncOriginals() async {
+    if (defaultTargetPlatform != TargetPlatform.android ||
+        !mounted ||
+        !widget.active ||
+        !_foreground ||
+        _checkingOriginals) {
+      return;
+    }
+    _originalStatusTimer?.cancel();
+    _checkingOriginals = true;
+    try {
+      final pending = await chatApi.pendingVoiceUploads(widget.personId);
+      if (!mounted) return;
+      final uploaded = _pendingOriginals.keys
+          .where((id) => !pending.containsKey(id))
+          .toSet();
+      setState(() {
+        _pendingOriginals = pending;
+        if (uploaded.isNotEmpty) {
+          _chapterHistory.updateAll(
+            (_, history) => [
+              for (final message in history)
+                if (uploaded.contains(message['id']))
+                  {...(message as Map), 'has_audio': true}
+                else
+                  message,
+            ],
+          );
+        }
+      });
+      if (uploaded.isNotEmpty) unawaited(_saveOpening());
+    } catch (_) {
+      // Pending files stay in the system queue when the foreground cannot query it.
+    } finally {
+      _checkingOriginals = false;
+      if (mounted &&
+          widget.active &&
+          _foreground &&
+          _pendingOriginals.values.any((upload) => !upload.blocked)) {
+        _originalStatusTimer = Timer(
+          const Duration(seconds: 4),
+          _syncOriginals,
+        );
+      }
+    }
   }
 
   Future<bool> _canStreamSpeech() async {
@@ -1686,8 +1911,9 @@ class _FreeChatPageState extends State<FreeChatPage>
         _sessionOutbox
                 .where(
                   (turn) =>
-                      turn['after_request'] != null ||
-                      identical(turn, speakingTurn),
+                      !_onlyOriginal(turn) &&
+                      (turn['after_request'] != null ||
+                          identical(turn, speakingTurn)),
                 )
                 .lastOrNull?['request_id']
             as String?;
@@ -2140,13 +2366,42 @@ class _FreeChatPageState extends State<FreeChatPage>
     }
   }
 
+  Future<void> _organizeInterview() async {
+    if (!_canSend || _interview?['can_draft'] != true) return;
+    setState(() => _switchingSession = true);
+    try {
+      if (!await consent(context, widget.personId) || !mounted) return;
+      final path = '$_interviewPath/draft';
+      final response = await chatApi.call('POST', path);
+      if (!mounted) return;
+      final saved = await reviewInterviewDraft(
+        context,
+        client: chatApi,
+        path: path,
+        draft: response['draft'] as Map,
+      );
+      if (saved && mounted) {
+        widget.onChapterChanged?.call();
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('书稿已保存到书架')));
+        await _messagesFor(_session);
+        if (mounted) unawaited(_saveOpening());
+      }
+    } catch (error) {
+      if (mounted) showError(context, error);
+    } finally {
+      if (mounted) setState(() => _switchingSession = false);
+    }
+  }
+
   Future<void> _openChapterOutbox() => showChatSheet<void>(
     context: context,
     builder: (sheet) => ListView(
       shrinkWrap: true,
       children: [
-        const ListTile(title: Text('本章未完成的输入')),
-        for (final turn in _sessionOutbox)
+        ListTile(title: Text(widget.interview ? '未完成的输入' : '本章未完成的输入')),
+        for (final turn in _visibleOutbox)
           ListTile(
             title: Text(
               (turn['text'] as String).isEmpty
@@ -2155,16 +2410,17 @@ class _FreeChatPageState extends State<FreeChatPage>
             ),
             trailing: Wrap(
               children: [
+                if (!_onlyOriginal(turn))
+                  IconButton(
+                    tooltip: '编辑草稿',
+                    icon: const Icon(Icons.edit_outlined),
+                    onPressed: () {
+                      Navigator.pop(sheet);
+                      unawaited(editTurn(turn));
+                    },
+                  ),
                 IconButton(
-                  tooltip: '编辑草稿',
-                  icon: const Icon(Icons.edit_outlined),
-                  onPressed: () {
-                    Navigator.pop(sheet);
-                    unawaited(editTurn(turn));
-                  },
-                ),
-                IconButton(
-                  tooltip: '重试',
+                  tooltip: _onlyOriginal(turn) ? '重试上传原声' : '重试',
                   icon: const Icon(Icons.refresh_rounded),
                   onPressed: () {
                     Navigator.pop(sheet);
@@ -2178,13 +2434,57 @@ class _FreeChatPageState extends State<FreeChatPage>
     ),
   );
 
+  String? _localOriginal(String id) =>
+      _pendingOriginals[id]?.path ??
+      _outbox
+              .where((turn) => turn['audio_message_id'] == id)
+              .firstOrNull?['audio_path']
+          as String?;
+
   Future<void> messageActions(dynamic message) async {
-    if (message['has_audio'] != 1 && message['has_audio'] != true) return;
+    final id = message['id'] as String;
+    final local = _localOriginal(id);
+    if (local == null &&
+        message['has_audio'] != 1 &&
+        message['has_audio'] != true) {
+      return;
+    }
     await _stopReply();
     if (!mounted) return;
+    final upload = _pendingOriginals[id];
+    final player = AudioButton(id: id, client: chatApi, localPath: local);
     await showChatSheet<void>(
       context: context,
-      builder: (_) => AudioButton(id: message['id'], client: chatApi),
+      builder: (sheet) => upload == null
+          ? player
+          : Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                player,
+                if (upload.blocked)
+                  TextButton(
+                    onPressed: () async {
+                      Navigator.pop(sheet);
+                      if (!await consent(context, widget.personId) ||
+                          !mounted) {
+                        return;
+                      }
+                      try {
+                        await chatApi.retryVoiceUpload(widget.personId, id);
+                        await _syncOriginals();
+                      } catch (error) {
+                        if (mounted) showError(context, error);
+                      }
+                    },
+                    child: const Text('重试上传原声'),
+                  )
+                else
+                  const Padding(
+                    padding: EdgeInsets.only(bottom: 12),
+                    child: Text('原声等待同步'),
+                  ),
+              ],
+            ),
     );
   }
 
@@ -2279,6 +2579,15 @@ class _FreeChatPageState extends State<FreeChatPage>
               !messages.any((m) => m['request_id'] == t['request_id']),
         )
         .toList();
+    final question = _interview?['question'] as int?;
+    final questionCount = _interview?['total'] as int?;
+    final answering =
+        question != null &&
+        questionCount != null &&
+        question > 0 &&
+        question <= questionCount;
+    final canSkip =
+        _canSend && !_sessionOutbox.any((turn) => !_onlyOriginal(turn));
     return Theme(
       data: chatChatTheme(context),
       child: SafeArea(
@@ -2309,7 +2618,18 @@ class _FreeChatPageState extends State<FreeChatPage>
                                   fontWeight: FontWeight.w900,
                                 ),
                               ),
-                              if (_topic case final topic?)
+                              if (widget.interview && question != null)
+                                Text(
+                                  question == 0
+                                      ? '自我介绍'
+                                      : answering
+                                      ? '访谈 $question / $questionCount'
+                                      : '访谈已完成',
+                                  style: Theme.of(
+                                    context,
+                                  ).textTheme.labelMedium,
+                                )
+                              else if (_topic case final topic?)
                                 Text(
                                   "第 ${topic['number']} 章 · ${topic['title']}",
                                   maxLines: 1,
@@ -2324,20 +2644,36 @@ class _FreeChatPageState extends State<FreeChatPage>
                         Row(
                           mainAxisAlignment: MainAxisAlignment.spaceBetween,
                           children: [
-                            Badge(
-                              isLabelVisible: _sessionOutbox.isNotEmpty,
-                              child: GlassIconButton(
-                                key: const ValueKey('assistant-history-button'),
-                                size: 48,
-                                iconSize: 26,
-                                useOwnLayer: true,
-                                glowColor: chatAccent.withValues(alpha: .18),
-                                onPressed: _sessionId == null
-                                    ? null
-                                    : _openTopics,
-                                icon: const Icon(Icons.segment_rounded),
+                            if (!widget.interview || _visibleOutbox.isNotEmpty)
+                              Badge(
+                                isLabelVisible: _visibleOutbox.isNotEmpty,
+                                child: GlassIconButton(
+                                  key: ValueKey(
+                                    widget.interview
+                                        ? 'interview-outbox-button'
+                                        : 'assistant-history-button',
+                                  ),
+                                  size: 48,
+                                  iconSize: 26,
+                                  useOwnLayer: true,
+                                  glowColor: chatAccent.withValues(alpha: .18),
+                                  onPressed: _sessionId == null
+                                      ? null
+                                      : widget.interview
+                                      ? _openChapterOutbox
+                                      : _openTopics,
+                                  icon: Icon(
+                                    widget.interview
+                                        ? Icons.pending_outlined
+                                        : Icons.segment_rounded,
+                                    semanticLabel: widget.interview
+                                        ? '未完成的输入'
+                                        : null,
+                                  ),
+                                ),
                               ),
-                            ),
+                            if (widget.interview && _visibleOutbox.isEmpty)
+                              const SizedBox(width: 48),
                             GlassIconButton(
                               key: const ValueKey('assistant-settings-button'),
                               size: 48,
@@ -2356,6 +2692,49 @@ class _FreeChatPageState extends State<FreeChatPage>
                     ),
                   ),
                 ),
+                if (widget.interview && question != null)
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 16),
+                    child: Wrap(
+                      spacing: 8,
+                      alignment: WrapAlignment.center,
+                      children: [
+                        if (question == 0)
+                          TextButton(
+                            onPressed: canSkip
+                                ? () => sendText(interviewAction: 'begin')
+                                : null,
+                            child: const Text('开始聊故事'),
+                          ),
+                        if (answering)
+                          TextButton(
+                            onPressed: canSkip
+                                ? () => sendText(interviewAction: 'skip')
+                                : null,
+                            child: const Text('跳过这题'),
+                          ),
+                        if (answering &&
+                            _interview?['minimum_characters'] != null)
+                          TextButton(
+                            onPressed: canSkip
+                                ? () => sendText(interviewAction: 'next')
+                                : null,
+                            child: const Text('下一题'),
+                          ),
+                        if (_interview?['can_draft'] == true)
+                          TextButton(
+                            onPressed: _canSend ? _organizeInterview : null,
+                            child: Text(_switchingSession ? '正在整理…' : '整理成书'),
+                          ),
+                      ],
+                    ),
+                  ),
+                if (widget.interview && answering)
+                  if (_interview?['characters'] case final int characters)
+                    Text(
+                      '本题已记录 $characters 字',
+                      style: Theme.of(context).textTheme.labelMedium,
+                    ),
                 if (_offline)
                   TextButton.icon(
                     onPressed: load,
@@ -2382,7 +2761,9 @@ class _FreeChatPageState extends State<FreeChatPage>
                               ),
                               TextButton(
                                 onPressed: load,
-                                child: const Text('重试加载章节'),
+                                child: Text(
+                                  widget.interview ? '重试加载访谈' : '重试加载章节',
+                                ),
                               ),
                             ],
                           ),
@@ -2593,7 +2974,11 @@ class _FreeChatPageState extends State<FreeChatPage>
         assistant &&
         id != null;
     final hasRecording =
-        !assistant && (m['has_audio'] == 1 || m['has_audio'] == true);
+        !assistant &&
+        id != null &&
+        (m['has_audio'] == 1 ||
+            m['has_audio'] == true ||
+            _localOriginal(id) != null);
     return ChatChatMessageBubble(
       key: id == null ? null : ValueKey(id),
       text: text,
@@ -2601,7 +2986,7 @@ class _FreeChatPageState extends State<FreeChatPage>
       playing: canPlay && _speakingReply == id,
       refreshing: _refreshingReply != null && _refreshingReply == id,
       canRefresh: !_chatBusy,
-      onRefresh: assistant && id != null && text.isNotEmpty
+      onRefresh: !widget.interview && assistant && id != null && text.isNotEmpty
           ? () => unawaited(_refreshQuestion(id, text, opening: opening))
           : null,
       onPlay: canPlay
