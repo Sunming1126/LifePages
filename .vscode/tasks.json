@@ -1,0 +1,12 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Build Android ARM64 debug",
+      "type": "process",
+      "command": "flutter",
+      "args": ["build", "apk", "--debug", "--target-platform", "android-arm64"],
+      "problemMatcher": []
+    }
+  ]
+}

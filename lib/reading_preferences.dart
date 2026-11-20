@@ -4,6 +4,7 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 const _storage = FlutterSecureStorage();
 const _largeTextKey = 'large_text_mode';
 final largeTextMode = ValueNotifier<bool>(false);
+final replyVoiceRevision = ValueNotifier<int>(0);
 
 Future<void> restoreReadingScale() async {
   try {
@@ -77,5 +78,8 @@ enum ReplyVoice {
     }
   }
 
-  Future<void> save() => _storage.write(key: _key, value: name);
+  Future<void> save() async {
+    await _storage.write(key: _key, value: name);
+    replyVoiceRevision.value++;
+  }
 }

@@ -23,6 +23,7 @@ ID = r'^[0-9a-f]{32}$'
 ROOM_SECONDS = 180
 # The current private speech resource delivered ten simultaneous audio streams.
 MAX_ROOMS = 10
+MAX_WARM_ROOMS = 3
 # Each provider command accepts up to 200 characters ending in punctuation.
 SENTENCE_END = '。！？.!?；;'
 
@@ -78,13 +79,20 @@ class Bootstrap(BaseModel):
     voice_id: str | None = None
 
 
-class TurnBootstrap(BaseModel):
-    request_id: str = Field(pattern=ID)
+class WarmBootstrap(BaseModel):
     book_id: str = Field(pattern=ID)
     voice_id: str | None = None
 
 
-class Speak(BaseModel):
+class TurnBootstrap(WarmBootstrap):
+    request_id: str = Field(pattern=ID)
+
+
+class TurnRef(BaseModel):
+    request_id: str | None = Field(default=None, pattern=ID)
+
+
+class Speak(TurnRef):
     segment: int = Field(ge=0)
 
 
@@ -92,7 +100,7 @@ class Speak(BaseModel):
 class Playback:
     owner: str
     credential: str
-    message_id: str
+    message_id: str | None
     segments: list[str]
     speaker: str
     book_id: str | None = None
@@ -105,6 +113,8 @@ class Playback:
     attempted: bool = False
     closing: bool = False
     next_segment: int = 0
+    warm: bool = False
+    finished_turns: set[str] = field(default_factory=set)
 
     @property
     def target(self):
@@ -201,7 +211,14 @@ async def bootstrap_turn(body: TurnBootstrap, request: Request):
     return reserve(owner, credential, body.request_id, [], body.book_id, voice_id=body.voice_id)
 
 
-def reserve(owner, credential, message_id, segments, book_id=None, *, voice_id=None):
+@app.post('/api/rtc/warm')
+async def bootstrap_warm(body: WarmBootstrap, request: Request):
+    owner, credential = await asyncio.to_thread(account_session, request.headers.get('authorization'))
+    await asyncio.to_thread(check_book, owner, body.book_id)
+    return reserve(owner, credential, None, [], body.book_id, voice_id=body.voice_id, warm=True)
+
+
+def reserve(owner, credential, message_id, segments, book_id=None, *, voice_id=None, warm=False):
     if not rtc_gateway.configured():
         raise HTTPException(503, '语音播报暂未配置')
     speaker = rtc_gateway.default_speaker() if voice_id is None else rtc_gateway.VOICE_PRESETS.get(voice_id)
@@ -210,16 +227,20 @@ def reserve(owner, credential, message_id, segments, book_id=None, *, voice_id=N
     rooms = app.state.rooms
     for existing_id, existing in rooms.items():
         if existing.owner == owner:
+            if not warm and existing.warm and existing.message_id is None:
+                # A second device may still use the original, per-reply API.
+                continue
             if (existing.credential == credential and not existing.closing and not existing.attempted
+                    and existing.warm == warm
                     and existing.message_id == message_id
                     and existing.book_id == book_id and existing.speaker == speaker
                     and time.time() < existing.expires):
                 return credentials(existing_id, existing)
             raise HTTPException(429, '上一次播报正在结束')
-    if len(rooms) >= MAX_ROOMS:
+    if len(rooms) >= MAX_ROOMS or (warm and sum(room.warm for room in rooms.values()) >= MAX_WARM_ROOMS):
         raise HTTPException(429, '语音播报繁忙')
     session_id = uuid4().hex
-    playback = Playback(owner, credential, message_id, segments, speaker, book_id)
+    playback = Playback(owner, credential, message_id, segments, speaker, book_id, warm=warm)
     result = credentials(session_id, playback)
     rooms[session_id] = playback
     return result
@@ -232,6 +253,7 @@ def credentials(session_id, playback):
         'botUserId': playback.bot, 'taskId': playback.task,
         'token': rtc_gateway.issue_token(playback.room, playback.user, playback.expires),
         'segments': len(playback.segments),
+        'ttlSeconds': max(0, playback.expires - int(time.time())),
     }
 
 
@@ -241,14 +263,14 @@ async def owned_room(request, session_id):
     return playback if playback and (playback.owner, playback.credential) == (owner, credential) else None
 
 
-def turn_segment(playback, index):
+def turn_segment(playback, request_id, index):
     with readonly(DATA / 'accounts' / playback.owner / 'lifepages.sqlite3') as conn:
         book_store.active(conn, playback.book_id)
         exists = conn.execute("SELECT 1 FROM sqlite_master WHERE name='rtc_turn_segments'").fetchone()
         segment = exists and conn.execute('''SELECT s.text FROM rtc_turn_segments s
             JOIN chat_turns t ON s.request_id=t.request_id
             WHERE s.request_id=? AND t.person_id=? AND s.segment=? AND s.created>=?''',
-            (playback.message_id, playback.book_id, index, int(time.time()) - ROOM_SECONDS)).fetchone()
+            (request_id, playback.book_id, index, int(time.time()) - ROOM_SECONDS)).fetchone()
     if not segment:
         raise HTTPException(409, '播报段落还未生成')
     text = segment[0].rstrip('，,、') or segment[0]
@@ -289,12 +311,20 @@ async def speak(session_id: str, body: Speak, request: Request):
         if playback.closing or time.time() >= playback.expires:
             raise HTTPException(404, '播报会话已结束')
         index = body.segment
+        request_id = playback.message_id
+        if playback.warm:
+            request_id = body.request_id
+            if (request_id is None or request_id in playback.finished_turns or
+                    playback.message_id not in (None, request_id)):
+                raise HTTPException(409, '播报请求已结束或不匹配')
+        elif body.request_id is not None:
+            raise HTTPException(409, '播报请求不匹配')
         if index < playback.next_segment:
             return {'accepted': True}
         if index != playback.next_segment:
             raise HTTPException(409, '播报段落顺序错误')
         if playback.book_id:
-            text = await asyncio.to_thread(turn_segment, playback, index)
+            text = await asyncio.to_thread(turn_segment, playback, request_id, index)
         else:
             if index >= len(playback.segments):
                 raise HTTPException(409, '播报段落顺序错误')
@@ -302,6 +332,12 @@ async def speak(session_id: str, body: Speak, request: Request):
             await asyncio.to_thread(reply_text, playback.owner, playback.message_id)
             text = playback.segments[index]
         client = app.state.client
+        if playback.warm and playback.message_id is None:
+            if any(room is not playback and room.owner == playback.owner
+                   and (not room.warm or room.message_id is not None)
+                   for room in app.state.rooms.values()):
+                raise HTTPException(429, '上一次播报正在结束')
+            playback.message_id = request_id
         try:
             await start_agent(playback)
             if playback.closing:
@@ -315,6 +351,24 @@ async def speak(session_id: str, body: Speak, request: Request):
             raise HTTPException(502, '语音播报暂时不可用') from None
         playback.next_segment += 1
         return {'accepted': True}
+
+
+@app.post('/api/rtc/sessions/{session_id}/finish')
+async def finish_turn(session_id: str, body: TurnRef, request: Request):
+    playback = await owned_room(request, session_id)
+    if playback is None or not playback.warm:
+        raise HTTPException(404, '播报会话已结束')
+    async with playback.lock:
+        request_id = body.request_id
+        if request_id is not None and request_id in playback.finished_turns:
+            return {'finished': True}
+        if (playback.closing or playback.expires <= time.time() or request_id is None or
+                playback.message_id != request_id or len(playback.finished_turns) >= 128):
+            raise HTTPException(409, '播报请求已结束或不匹配')
+        playback.finished_turns.add(request_id)
+        playback.message_id = None
+        playback.next_segment = 0
+        return {'finished': True}
 
 
 @app.delete('/api/rtc/sessions/{session_id}')

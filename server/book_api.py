@@ -9,8 +9,9 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from server import book_store as books, chapter_sharing, chat_sessions
+from server import book_store as books, chapter_sharing, chat_sessions, interview
 from server.book_topics import TEMPLATES
+from server.interview_questions import CURRENT_VERSION
 from server.memory_vectors import VectorIndex
 
 router = APIRouter(prefix='/api/books')
@@ -25,6 +26,7 @@ class BookInput(BookMetadata):
     id: Optional[str] = Field(default=None, pattern=r'^[0-9a-f]{32}$')
     name: str = Field(min_length=1, max_length=100)
     template_id: str = 'life'
+    interview: bool = False
 
 
 def state(c):
@@ -34,7 +36,8 @@ def state(c):
         ORDER BY b.updated DESC,b.rowid DESC''')]
     by_id = {row['id']: row for row in rows}
     for row in rows:
-        row.update(chapter_count=0, completed_topic_count=0, character_count=0)
+        row.update(chapter_count=0, completed_topic_count=0, character_count=0,
+                   interview_version=CURRENT_VERSION)
     for chapter in c.execute('''SELECT ch.person_id,ch.content,
         EXISTS(SELECT 1 FROM book_topics t WHERE t.book_id=ch.person_id AND t.chapter_id=ch.id) AS linked
         FROM chapters ch JOIN books b ON b.id=ch.person_id
@@ -48,7 +51,7 @@ def state(c):
         row['character_count'] += count
         row['completed_topic_count'] += chapter['linked']
     active = c.execute('SELECT active_id FROM book_state').fetchone()[0]
-    return {'active_id': active, 'books': [r for r in rows if r['deleted_at'] is None],
+    return {'active_id': active, 'interview_version': CURRENT_VERSION, 'books': [r for r in rows if r['deleted_at'] is None],
             'trash': [r for r in rows if r['deleted_at'] is not None],
             'retired_ids': [row[0] for row in c.execute('SELECT id FROM retired_books')]}
 
@@ -93,7 +96,8 @@ def create(data: BookInput, request: Request):
         else:
             if data.id and c.execute('SELECT 1 FROM retired_books WHERE id=?', (data.id,)).fetchone():
                 raise HTTPException(410, '原书已到期清理，请重新填写')
-            bid = books.create(c, title, name, author, data.id, data.template_id)
+            bid = books.create(c, title, name, author, data.id, data.template_id,
+                               seed_topics=not data.interview)
         return {'id': bid, **state(c)}
 
 
@@ -147,7 +151,8 @@ def templates(request: Request):
 
 @router.get('/{bid}/topics')
 def topics(bid: str, request: Request, editor: bool = False,
-           include_manuscript: bool = False, preferred_id: str | None = None):
+           include_manuscript: bool = False, preferred_id: str | None = None,
+           interview_only: bool = False):
     backend.require(request)
     with closing(backend.db()) as c:
         initialize(c)
@@ -158,14 +163,18 @@ def topics(bid: str, request: Request, editor: bool = False,
         books.active(c, bid)
         rows = [dict(row) for row in c.execute('''SELECT t.id,t.number,t.theme,t.title,t.question,ch.content,d.id AS draft_id,
             t.chapter_id FROM book_topics t LEFT JOIN chapters ch ON ch.id=t.chapter_id
-            LEFT JOIN topic_drafts d ON d.topic_id=t.id WHERE t.book_id=? ORDER BY t.number''', (bid,))]
+            LEFT JOIN topic_drafts d ON d.topic_id=t.id
+            WHERE t.book_id=? AND (NOT ? OR t.chapter_id IS NOT NULL OR d.id IS NOT NULL
+            OR EXISTS(SELECT 1 FROM topic_insertions i WHERE i.topic_id=t.id)
+            OR EXISTS(SELECT 1 FROM topic_manuscripts m WHERE m.topic_id=t.id))
+            ORDER BY t.number''', (bid, interview_only))]
         for row in rows:
             row['character_count'] = len(''.join((row.pop('content') or '').split()))
         selected = chat_sessions.active(c, bid)
         ids = {row['id'] for row in rows}
-        active_id = selected if selected in ids else rows[0]['id']
-        result = {'active_id': active_id, 'topics': rows}
-        if editor and include_manuscript:
+        active_id = selected if selected in ids else rows[0]['id'] if rows else None
+        result = {'active_id': active_id, 'topics': rows, 'deferred_voice_upload': True}
+        if editor and include_manuscript and active_id is not None:
             initial_id = preferred_id if preferred_id in ids else active_id
             result['manuscript'] = books.manuscript_snapshot(c, books.topic(c, bid, initial_id))
         return result
@@ -186,7 +195,7 @@ def select_topic(bid: str, tid: str, request: Request, include_messages: bool = 
 
 
 @router.get('/{bid}/chapters')
-def chapter_list(bid: str, request: Request, include_material: bool = False):
+def chapter_list(bid: str, request: Request, include_material: bool = False, interview_only: bool = False):
     backend.require(request)
     with closing(backend.db()) as c:
         initialize(c)
@@ -203,6 +212,25 @@ def chapter_list(bid: str, request: Request, include_material: bool = False):
             if blocks is not None:
                 chapter['blocks'] = json.loads(blocks)
         if not include_material:
+            return chapters
+        if interview_only:
+            started = interview.find(c, bid) is not None
+            for chapter in chapters:
+                selected = {}
+                if started:
+                    for row in c.execute('''SELECT p.message_id,p.quote FROM interview_chapter_passages p
+                        WHERE p.topic_id=? ORDER BY p.rowid''', (chapter['topic_id'],)):
+                        selected.setdefault(row['message_id'], []).append(row['quote'])
+                chapter['narrations'] = [
+                    {**row, 'text': '\n'.join(selected[row['id']]) if row['id'] in selected else row['text']}
+                    for row in c.execute('''SELECT m.id,m.text,
+                    m.audio IS NOT NULL AND EXISTS(SELECT 1 FROM chapter_audio a
+                        WHERE a.chapter_id=? AND a.message_id=m.id) AS has_audio FROM messages m
+                    WHERE m.id IN (SELECT message_id FROM chapter_sources WHERE chapter_id=?
+                        UNION SELECT message_id FROM chapter_audio WHERE chapter_id=?)
+                    ORDER BY m.rowid''', (chapter['id'],) * 3)]
+                chapter['has_audio'] = chapter['has_chapter_audio'] = bool(chapter['has_audio'])
+                chapter['audio_count'] = sum(row['has_audio'] for row in chapter['narrations'])
             return chapters
         finished = {row['id']: row for row in chapters if row['topic_number'] is not None}
         material = {}
@@ -247,6 +275,8 @@ async def make_draft(bid, tid, automatic=False, compiling=False):
     from server.account_profile import background_ai
     with closing(backend.db()) as c:
         if automatic and not background_ai(c):
+            return 'insufficient'
+        if automatic and interview.find(c, bid):
             return 'insufficient'
         initialize(c)
         c.execute('BEGIN')
@@ -321,6 +351,8 @@ async def make_draft(bid, tid, automatic=False, compiling=False):
     with closing(backend.db()) as c, c:
         c.execute('BEGIN IMMEDIATE')
         if automatic and not background_ai(c):
+            return 'conflict'
+        if automatic and interview.find(c, bid):
             return 'conflict'
         latest = books.topic(c, bid, tid)
         if ((latest['revision'], latest['checked_rowid']) != (topic['revision'], topic['checked_rowid'])

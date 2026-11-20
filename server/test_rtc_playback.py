@@ -224,3 +224,46 @@ class RtcPlaybackTest(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(self.cloud.await_args.args[2]['Message'], '那晚的星空真美。')
         self.assertEqual(self.cloud.await_count, 2)
+
+    def test_warm_room_reuses_one_agent_and_rejects_old_or_cross_book_turns(self):
+        first, second, other_book = ('f' * 32, '1' * 32, '2' * 32)
+        with closing(sqlite3.connect(rtc_playback.DATA / 'accounts' / self.owner / 'lifepages.sqlite3')) as db, db:
+            db.execute('CREATE TABLE chat_turns (request_id TEXT, person_id TEXT)')
+            db.execute('CREATE TABLE rtc_turn_segments (request_id TEXT, segment INTEGER, text TEXT, created INTEGER)')
+            for rid, bid, text in ((first, self.book, '虚构第一条。'), (second, self.book, '虚构第二条。'),
+                                   (other_book, self.other_book, '另一书稿。')):
+                db.execute('INSERT INTO chat_turns VALUES (?,?)', (rid, bid))
+                db.execute('INSERT INTO rtc_turn_segments VALUES (?,?,?,?)', (rid, 0, text, int(time.time())))
+        room = self.client.post('/api/rtc/warm', json={'book_id': self.book}, headers=self.headers)
+        self.assertEqual(room.status_code, 200)
+        path = '/api/rtc/sessions/' + room.json()['sessionId']
+        self.assertEqual(self.client.post(path + '/start', headers=self.headers).status_code, 200)
+        self.assertEqual(self.cloud.await_count, 1)
+
+        def speak(rid, headers=None):
+            return self.client.post(path + '/speak', json={'segment': 0, 'request_id': rid},
+                                    headers=headers or self.headers).status_code
+
+        def finish(rid):
+            return self.client.post(path + '/finish', json={'request_id': rid}, headers=self.headers).status_code
+
+        legacy = self.bootstrap(self.reply, self.headers)
+        self.assertEqual(legacy.status_code, 200)
+        self.assertEqual(speak(first), 429)
+        self.client.delete('/api/rtc/sessions/' + legacy.json()['sessionId'], headers=self.headers)
+        self.assertEqual(speak(first, self.other_headers), 404)
+        self.assertEqual(speak(other_book), 409)
+        self.assertEqual(speak(first), 200)
+        self.assertEqual(speak(first), 200)
+        self.assertEqual(speak(second), 409)
+        self.assertEqual(finish(first), 200)
+        self.assertEqual(speak(second), 200)
+        self.assertEqual(finish(first), 200)
+        self.assertEqual(speak(first), 409)
+        self.assertEqual(finish(second), 200)
+        self.client.delete(path, headers=self.headers)
+        calls = [call.args for call in self.cloud.await_args_list]
+        self.assertEqual([args[1] for args in calls], [
+            'StartVoiceChat', 'UpdateVoiceChat', 'UpdateVoiceChat', 'StopVoiceChat',
+        ])
+        self.assertEqual([args[2]['Message'] for args in calls[1:3]], ['虚构第一条。', '虚构第二条。'])

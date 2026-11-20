@@ -2,13 +2,14 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart' show defaultTargetPlatform;
 import 'package:flutter/services.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:life_pages/chat_shell.dart';
 import 'package:life_pages/chapter_editor.dart';
 import 'package:life_pages/bookshelf.dart' show newBookSheet;
-import 'package:life_pages/main.dart' show Api, BookPage, paper, secure;
+import 'package:life_pages/main.dart' show Api, BookPage, paper, secure, bookQrModules;
 import 'package:life_pages/book_cover.dart';
 
 class ShelfApi extends Api {
@@ -170,7 +171,138 @@ Future<void> settleShelf(WidgetTester tester) async {
   await tester.pumpAndSettle();
 }
 
+class InterviewShelfApi extends ShelfApi {
+  InterviewShelfApi() {
+    books.single['interview_version'] = 1;
+  }
+
+  bool saved = false;
+
+  @override
+  Future<dynamic> call(
+    String method,
+    String path, [
+    Map<String, dynamic>? body,
+  ]) async {
+    switch (path) {
+      case '/api/books/first/interview':
+        expect(method, 'POST');
+        return {
+          'active_id': 'interview-session',
+          'interview': {
+            'question': 2,
+            'total': 30,
+            'revision': 2,
+            'can_draft': true,
+          },
+          'messages': [
+            {'id': 'assistant', 'role': 'assistant', 'text': '您还记得小时候的玩伴吗？'},
+          ],
+        };
+      case '/api/books/first/interview/draft':
+        expect(method, 'POST');
+        return {
+          'draft': {
+            'id': 'draft-one',
+            'chapters': [
+              {'title': '井台边', 'body': '我曾在井台边捏泥人。'},
+            ],
+          },
+        };
+      case '/api/books/first/interview/draft/draft-one':
+        expect(method, 'PUT');
+        expect(body?['chapters'], [
+          {'title': '童年的井台', 'body': '我曾在井台边捏泥人。'},
+        ]);
+        saved = true;
+        return {
+          'chapter_ids': ['chapter-one'],
+        };
+      case '/api/people/first?session_id=interview-session':
+        return {
+          'interview': {
+            'question': 2,
+            'total': 30,
+            'revision': 2,
+            'can_draft': false,
+          },
+          'messages': [],
+        };
+    }
+    expect(path, isNot(contains('/topics')));
+    return super.call(method, path, body);
+  }
+}
+
 void main() {
+  testWidgets(
+    'interview opens one conversation and can edit before saving a book draft',
+    (tester) async {
+      FlutterSecureStorage.setMockInitialValues({'ai_consent_v2_first': 'yes'});
+      final client = InterviewShelfApi();
+      final directory = Directory.systemTemp.createTempSync(
+        'lifepages-interview-',
+      );
+      addTearDown(() => directory.delete(recursive: true));
+      await tester.pumpWidget(
+        MaterialApp(
+          home: ChatShell(
+            client: client,
+            documentsDirectory: () async => directory,
+          ),
+        ),
+      );
+      await settleShelf(tester);
+      expect(
+        find.byKey(const ValueKey('assistant-history-button')),
+        findsNothing,
+      );
+      expect(find.text('访谈 2 / 30'), findsOneWidget);
+      expect(find.text('跳过这题'), findsOneWidget);
+      await tester.tap(find.text('整理成书'));
+      await tester.pumpAndSettle();
+      expect(find.text('书稿草稿'), findsOneWidget);
+      await tester.enterText(
+        find.byKey(const ValueKey('draft-title-0')),
+        '童年的井台',
+      );
+      await tester.tap(find.text('保存到书架'));
+      await tester.pumpAndSettle();
+      expect(client.saved, isTrue);
+      expect(find.text('书稿草稿'), findsNothing);
+      expect(find.text('整理成书'), findsNothing);
+    },
+    variant: TargetPlatformVariant.only(TargetPlatform.android),
+  );
+
+  testWidgets('interview export numbers the visible chapters in order', (
+    tester,
+  ) async {
+    FlutterSecureStorage.setMockInitialValues({});
+    final client = ShelfApi()
+      ..previewRows.add({
+        'id': 'finished',
+        'topic_number': 27,
+        'title': '井台边',
+        'content': '这是第一章。',
+        'has_audio': false,
+      });
+    await tester.pumpWidget(
+      MaterialApp(
+        home: BookPage(
+          name: '您',
+          bookId: 'first',
+          title: '我的回忆录',
+          client: client,
+          interview: true,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('第 1 章'), findsWidgets);
+    expect(find.text('第 27 章'), findsNothing);
+  });
+
   testWidgets('new book previews a template before choosing it', (
     tester,
   ) async {
@@ -206,7 +338,7 @@ void main() {
     await tester.tap(find.text('创建书籍'));
     await tester.pumpAndSettle();
     expect(submitted?['template_id'], 'family');
-  });
+  }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
 
   testWidgets('book preview shows raw stories and opens the finished PDF', (
     tester,
@@ -275,7 +407,11 @@ void main() {
       'https://test/listen/exported',
       '',
     ]);
-  });
+    if (defaultTargetPlatform == TargetPlatform.android) {
+      expect(chapters.first['qr'], bookQrModules('https://test/listen/exported'));
+      expect(chapters.last['qr'], isEmpty);
+    }
+  }, variant: TargetPlatformVariant({TargetPlatform.iOS, TargetPlatform.android}));
 
   testWidgets('shelf creates, switches, trashes and restores books', (
     tester,
@@ -368,7 +504,7 @@ void main() {
     await tester.tap(find.text('恢复'));
     await settleShelf(tester);
     expect(find.text('0/26 章 · 0 字'), findsNWidgets(2));
-  });
+  }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
 
   testWidgets(
     'cold entry opens immediately and reentry shows cached text while offline',
@@ -430,9 +566,11 @@ void main() {
       delayed.complete();
       await settleShelf(tester);
       expect(find.text('刚刚写下的新内容。'), findsOneWidget);
+      // Leaving awaits the local draft write before Windows removes its file.
+      await tester.pageBack();
+      await settleShelf(tester);
       await tester.pumpWidget(const SizedBox.shrink());
-    },
-  );
+    }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
 
   testWidgets('shelf opens editor directly, with preview in the book menu', (
     tester,
@@ -566,5 +704,5 @@ void main() {
     await settleShelf(tester);
     expect(find.byType(ChapterEditor), findsOneWidget);
     expect(find.widgetWithText(AppBar, '新书名'), findsOneWidget);
-  });
+  }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
 }

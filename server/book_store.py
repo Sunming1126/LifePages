@@ -6,7 +6,7 @@ import uuid
 
 from fastapi import HTTPException
 
-from server import chat_sessions, memory
+from server import chat_sessions, interview, memory
 from server.book_topics import TEMPLATES
 
 SCHEMA = """
@@ -113,17 +113,18 @@ def add_topic(c, bid, number, theme, title, question, tid=None, cid=None):
     return tid
 
 
-def seed(c, bid, title, author, template='life'):
+def seed(c, bid, title, author, template='life', *, seed_topics=True):
     c.execute('INSERT INTO books(id,title,author) VALUES(?,?,?)', (bid, title, author))
     c.execute('INSERT INTO book_templates VALUES(?,?)', (bid, template))
-    for number, (theme, name, question) in enumerate(TEMPLATES[template][1], 1):
-        add_topic(c, bid, number, theme, name, question)
+    if seed_topics:
+        for number, (theme, name, question) in enumerate(TEMPLATES[template][1], 1):
+            add_topic(c, bid, number, theme, name, question)
 
 
-def create(c, title, name, author, bid=None, template='life'):
+def create(c, title, name, author, bid=None, template='life', *, seed_topics=True):
     bid = bid or uuid.uuid4().hex
     c.execute('INSERT INTO people(id,name) VALUES(?,?)', (bid, name))
-    seed(c, bid, title, author, template)
+    seed(c, bid, title, author, template, seed_topics=seed_topics)
     c.execute('UPDATE book_state SET active_id=? WHERE singleton=1', (bid,))
     return bid
 
@@ -215,6 +216,8 @@ def purge(c, bid):
     c.execute('INSERT OR IGNORE INTO retired_books VALUES(?)', (bid,))
     queue_vectors(c, 'WHERE person_id=?', (bid,))
     queue_audio(c, 'SELECT audio FROM messages WHERE person_id=?', (bid,))
+    if interview.find(c, bid):
+        c.execute('DELETE FROM book_interviews WHERE book_id=?', (bid,))
     c.execute("""INSERT OR IGNORE INTO book_cleanup SELECT 'share','',s.token_hash
         FROM shares s JOIN chapters ch ON ch.id=s.chapter_id WHERE ch.person_id=?""", (bid,))
     queries = (

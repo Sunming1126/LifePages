@@ -37,11 +37,13 @@ class Capture extends VoiceCapture {
 }
 
 class Wire extends VoiceWire {
-  Wire({this.recognizes = true});
+  Wire({this.recognizes = true, this.finishes = true});
 
   final bool recognizes;
+  final bool finishes;
   final incoming = StreamController<dynamic>.broadcast();
   int chunks = 0;
+  bool finishRequested = false;
   void event(String event, [Map<String, dynamic>? sentence]) => incoming.add(
     jsonEncode({
       'header': {'event': event},
@@ -58,7 +60,10 @@ class Wire extends VoiceWire {
     if (data is String) {
       final action = jsonDecode(data)['header']['action'];
       if (action == 'run-task') event('task-started');
-      if (action == 'finish-task') event('task-finished');
+      if (action == 'finish-task') {
+        finishRequested = true;
+        if (finishes) event('task-finished');
+      }
     } else if (recognizes) {
       chunks++;
       event('result-generated', {
@@ -77,6 +82,11 @@ class Wire extends VoiceWire {
 
 class ChatApi extends Api {
   final turns = <Map<String, dynamic>>[];
+  final turnPaths = <String>[];
+  final queuedOriginals = <String>[];
+  bool supportsDeferredAudio = false;
+  Completer<String>? nativeQueue;
+  String? fallbackAudio;
   List<dynamic> history = [];
   final topics = [
     {
@@ -103,6 +113,24 @@ class ChatApi extends Api {
   final refreshRequests = <String>[];
   int topicRequests = 0, historyRequests = 0;
   @override
+  Future<String> enqueueVoiceUpload({
+    required String book,
+    required String message,
+    required String request,
+    required String path,
+  }) async {
+    queuedOriginals.add(path);
+    expect(message, 'user-1');
+    expect(request, turns.single['request_id']);
+    return nativeQueue!.future;
+  }
+
+  @override
+  Future<Map<String, PendingVoiceUpload>> pendingVoiceUploads(
+    String book,
+  ) async => {};
+
+  @override
   Stream<Map<String, dynamic>> streamTurn(
     String path,
     Map<String, dynamic> body, {
@@ -123,6 +151,10 @@ class ChatApi extends Api {
     String path, [
     Map<String, dynamic>? body,
   ]) async {
+    if (path == '/api/transcribe') {
+      fallbackAudio = body!['audio_base64'] as String;
+      return {'text': '我小时候住在海边。'};
+    }
     if (path.endsWith('/voice/token')) {
       return {
         'token': 'st-test',
@@ -141,7 +173,11 @@ class ChatApi extends Api {
     if (uri.path.endsWith('/topics')) {
       topicRequests++;
       await topicBlock?.future;
-      return {'active_id': activeSession, 'topics': topics};
+      return {
+        'active_id': activeSession,
+        'topics': topics,
+        if (supportsDeferredAudio) 'deferred_voice_upload': true,
+      };
     }
     if (method == 'PUT' && uri.path.endsWith('/active')) {
       await activationBlock?.future;
@@ -164,7 +200,8 @@ class ChatApi extends Api {
         'chapters': [],
       };
     }
-    if (path.endsWith('/turns')) {
+    if (path.endsWith('/turns') || path.endsWith('/voice-turns')) {
+      turnPaths.add(path);
       turns.add(Map<String, dynamic>.from(body!));
       await responseBlock?.future;
       final id = body['session_id'] as String? ?? 'p';
@@ -180,7 +217,13 @@ class ChatApi extends Api {
         },
         {'id': 'ai-${turns.length}', 'role': 'assistant', 'text': '我在听。'},
       ]);
-      return {'text': '我在听。'};
+      return {
+        'text': '我在听。',
+        if (path.endsWith('/voice-turns')) ...{
+          'user_id': 'user-${turns.length}',
+          'assistant_id': 'ai-${turns.length}',
+        },
+      };
     }
     throw StateError('Unexpected API request $path');
   }
@@ -245,6 +288,7 @@ void main() {
     int tab = 0,
     RtcReplyPlayer? player,
     bool recognizes = true,
+    bool finishes = true,
   }) => MaterialApp(
     theme: ThemeData(
       useMaterial3: true,
@@ -275,7 +319,10 @@ void main() {
                     client: api,
                     documentsDirectory: () async => dir,
                     voiceConnector: (url, headers) async {
-                      final w = Wire(recognizes: recognizes);
+                      final w = Wire(
+                        recognizes: recognizes,
+                        finishes: finishes,
+                      );
                       wires.add(w);
                       return w;
                     },
@@ -433,6 +480,11 @@ void main() {
 
         await record();
         expect(capture.starts, 1);
+        // Windows may complete the WAV write after the fixed frame flushes.
+        // Wait for the observable request, while keeping the exact count below.
+        for (var i = 0; i < 20 && api.turns.isEmpty; i++) {
+          await flush(tester);
+        }
         expect(api.turns, hasLength(1));
         expect(player.segments, [
           [0],
@@ -488,6 +540,77 @@ void main() {
       },
     );
   }
+
+  testWidgets(
+    'Android recovers a stalled realtime transcript with the saved WAV',
+    (tester) async {
+      await tester.pumpWidget(harness(finishes: false));
+      await flush(tester);
+      final gesture = await hold(tester);
+      capture.audio.add(List<int>.filled(3200, 1));
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 650)),
+      );
+      await gesture.up();
+      for (var i = 0; i < 5 && !wires.single.finishRequested; i++) {
+        await flush(tester);
+      }
+      expect(wires.single.finishRequested, isTrue);
+      expect(api.turns, isEmpty);
+      await tester.pump(const Duration(milliseconds: 3100));
+      for (var i = 0; i < 5 && api.turns.isEmpty; i++) {
+        await flush(tester);
+      }
+      final turn = api.turns.single;
+      expect(turn['text'], '我小时候住在海边。');
+      expect(turn['audio_base64'], api.fallbackAudio);
+      expect(
+        utf8.decode(base64Decode(api.fallbackAudio!).take(4).toList()),
+        'RIFF',
+      );
+    },
+    variant: TargetPlatformVariant.only(TargetPlatform.android),
+  );
+
+  testWidgets(
+    'Android displays the streamed reply before native audio upload',
+    (tester) async {
+      api.supportsDeferredAudio = true;
+      api.firstChunk = Completer<String>();
+      api.responseBlock = Completer<void>();
+      api.nativeQueue = Completer<String>();
+      await tester.pumpWidget(harness());
+      await flush(tester);
+      final gesture = await hold(tester);
+      capture.audio.add(List<int>.filled(3200, 1));
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 650)),
+      );
+      await gesture.up();
+      await flush(tester);
+      api.firstChunk!.complete('先收到文字');
+      for (var i = 0; i < 5 && api.turns.isEmpty; i++) {
+        await flush(tester);
+      }
+      expect(api.turnPaths.single, '/api/people/p/voice-turns');
+      expect(api.turns.single['payload_hash'], matches(r'^[0-9a-f]{64}$'));
+      expect(api.turns.single.containsKey('audio_base64'), isFalse);
+      expect(find.text('先收到文字'), findsOneWidget);
+      expect(api.queuedOriginals, isEmpty);
+
+      api.responseBlock!.complete();
+      for (var i = 0; i < 5 && api.queuedOriginals.isEmpty; i++) {
+        await flush(tester);
+      }
+      expect(find.text('我在听。'), findsOneWidget);
+      expect(File(api.queuedOriginals.single).existsSync(), isTrue);
+      api.nativeQueue!.complete('${dir.path}/native.wav');
+      await flush(tester);
+      expect(File(api.queuedOriginals.single).existsSync(), isFalse);
+      await tester.pumpWidget(const SizedBox.shrink());
+    },
+    variant: TargetPlatformVariant.only(TargetPlatform.android),
+  );
 
   testWidgets('unrecognized voice is kept on disk and is not submitted', (
     tester,
@@ -765,7 +888,7 @@ void main() {
     await tester.enterText(find.byType(TextField), '留在第一章的草稿');
 
     Future<void> openSessionSheet() async {
-      await tester.tap(find.byKey(const ValueKey('assistant-history-button')));
+      await tester.tap(find.byKey(const ValueKey('assistant-settings-button')));
       await tester.pumpAndSettle();
       expect(find.text('章节目录'), findsOneWidget);
       final sheet = tester.getRect(

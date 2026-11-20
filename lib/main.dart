@@ -1,4 +1,8 @@
 import 'book_cover.dart';
+import 'offline_cache.dart';
+import 'voice_preferences.dart';
+import 'platform_capabilities.dart';
+import 'package:flutter/foundation.dart' show defaultTargetPlatform;
 import 'chat_sheet.dart';
 import 'chapter_editor.dart';
 import 'reading_preferences.dart';
@@ -27,8 +31,17 @@ final api = Api();
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  await Future.wait([LiquidGlassWidgets.initialize(), restoreReadingScale()]);
-  runApp(const LifePages());
+  if (Platform.isAndroid) {
+    runApp(const LifePages());
+    unawaited(restoreReadingScale());
+    unawaited(restoreAutomaticReplyAudio());
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      unawaited(LiquidGlassWidgets.initialize(enablePerformanceMonitor: false));
+    });
+  } else {
+    await Future.wait([LiquidGlassWidgets.initialize(), restoreReadingScale()]);
+    runApp(const LifePages());
+  }
 }
 
 class LifePages extends StatelessWidget {
@@ -90,8 +103,26 @@ class ApiFailure implements Exception {
   String toString() => '$message';
 }
 
+typedef PendingVoiceUpload = ({String path, bool blocked});
+
 class Api {
-  late final http.Client _client = http.Client();
+  Api({http.Client? client, ReadCache? cache, bool? offlineReads})
+    : _client = client ?? http.Client(),
+      _cache = cache ?? ReadCache(getApplicationSupportDirectory),
+      offlineReads = offlineReads ?? Platform.isAndroid;
+  final http.Client _client;
+  final ReadCache _cache;
+  final bool offlineReads;
+  static const _voiceUploads = MethodChannel('life_pages/voice_uploads');
+  String get _scope => '$base\u0000$token';
+  Future<dynamic> readSnapshot(String path) async =>
+      offlineReads && token.isNotEmpty ? _cache.read(_scope, path) : null;
+  Future<void> writeSnapshot(String path, dynamic data) async {
+    if (offlineReads && token.isNotEmpty) {
+      await _cache.write(_scope, path, data);
+    }
+  }
+
   String base = 'https://onesay.top/lifepages';
   String token = '';
   Map<String, String> get headers => {
@@ -106,10 +137,27 @@ class Api {
     final request = http.Request(method, Uri.parse('$base$path'))
       ..headers.addAll(headers);
     if (body != null) request.body = jsonEncode(body);
-    final response = await http.Response.fromStream(
-      await _client.send(request).timeout(const Duration(minutes: 4)),
-    );
-    return _responseData(response);
+    try {
+      final response =
+          await (() async => http.Response.fromStream(
+            await _client.send(request),
+          ))().timeout(
+            offlineReads && method == 'GET'
+                ? const Duration(seconds: 8)
+                : const Duration(minutes: 4),
+          );
+      final data = _responseData(response);
+      if (method == 'GET') await writeSnapshot(path, data);
+      return data;
+    } on ApiFailure {
+      rethrow;
+    } catch (_) {
+      if (method == 'GET') {
+        final saved = await readSnapshot(path);
+        if (saved != null) return saved;
+      }
+      rethrow;
+    }
   }
 
   dynamic _responseData(http.Response response) {
@@ -146,7 +194,7 @@ class Api {
         response,
       ).timeout(const Duration(seconds: 15));
       // A client installed before its server is upgraded can still send turns.
-      if (response.statusCode == 404) {
+      if (response.statusCode == 404 && path.endsWith('/turns')) {
         final reply = await call('POST', path, body) as Map;
         yield {'type': 'done', ...Map<String, dynamic>.from(reply)};
         return;
@@ -162,6 +210,47 @@ class Api {
       if (line.isNotEmpty) yield jsonDecode(line) as Map<String, dynamic>;
     }
   }
+
+  Future<String> enqueueVoiceUpload({
+    required String book,
+    required String message,
+    required String request,
+    required String path,
+  }) async => (await _voiceUploads.invokeMethod<String>('enqueue', {
+    'base': base,
+    'token': token,
+    'book': book,
+    'message': message,
+    'request': request,
+    'path': path,
+  }))!;
+
+  Future<Map<String, PendingVoiceUpload>> pendingVoiceUploads(
+    String book,
+  ) async {
+    final uploads = await _voiceUploads.invokeMapMethod<String, dynamic>(
+      'pending',
+      {'base': base, 'book': book},
+    );
+    return {
+      for (final entry in (uploads ?? const <String, dynamic>{}).entries)
+        entry.key: (
+          path: entry.value['path'] as String,
+          blocked: entry.value['blocked'] == true,
+        ),
+    };
+  }
+
+  Future<void> retryVoiceUpload(String book, String message) =>
+      _voiceUploads.invokeMethod<void>('retry', {
+        'base': base,
+        'token': token,
+        'book': book,
+        'message': message,
+      });
+
+  Future<void> pauseVoiceUploads(String book) =>
+      _voiceUploads.invokeMethod<void>('pause', {'base': base, 'book': book});
 
   Future<String> audio(String id) async {
     final response = await http.get(
@@ -239,7 +328,13 @@ class _StartupState extends State<Startup> {
 
   Future<void> _newGuest() async {
     final bootstrapClient = Api()..base = api.base;
-    final result = await bootstrapClient.call('POST', '/api/bootstrap');
+    final result = await bootstrapClient
+        .call('POST', '/api/bootstrap')
+        .timeout(
+          Platform.isAndroid
+              ? const Duration(seconds: 8)
+              : const Duration(minutes: 4),
+        );
     final token = result['token'] as String;
     await secure.write(key: 'device_token', value: token);
     _guestToken = token;
@@ -281,7 +376,23 @@ class _StartupState extends State<Startup> {
   @override
   Widget build(BuildContext context) {
     if (loading) {
-      return const Scaffold(body: Center(child: CircularProgressIndicator()));
+      return const Scaffold(
+        body: Center(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                'LifePages',
+                style: TextStyle(fontSize: 28, fontWeight: FontWeight.bold),
+              ),
+              SizedBox(height: 20),
+              CircularProgressIndicator(),
+              SizedBox(height: 16),
+              Text('正在打开你的回忆录…'),
+            ],
+          ),
+        ),
+      );
     }
     if (error != null) {
       return Scaffold(
@@ -917,7 +1028,8 @@ class _PersonPageState extends State<PersonPage> {
 class AudioButton extends StatefulWidget {
   final String id;
   final Api? client;
-  const AudioButton({super.key, required this.id, this.client});
+  final String? localPath;
+  const AudioButton({super.key, required this.id, this.client, this.localPath});
   @override
   State<AudioButton> createState() => _AudioButtonState();
 }
@@ -938,9 +1050,12 @@ class _AudioButtonState extends State<AudioButton> {
         : () async {
             setState(() => busy = true);
             try {
-              await (player ??= AudioPlayer()).play(
-                DeviceFileSource(await (widget.client ?? api).audio(widget.id)),
-              );
+              final path = widget.localPath;
+              final source = path != null && await File(path).exists()
+                  ? path
+                  : await (widget.client ?? api).audio(widget.id);
+              if (!mounted) return;
+              await (player ??= AudioPlayer()).play(DeviceFileSource(source));
             } catch (e) {
               if (context.mounted) showError(context, e);
             } finally {
@@ -954,10 +1069,24 @@ class _AudioButtonState extends State<AudioButton> {
 
 String aiConsentKey(String bookId) => 'ai_consent_v2_$bookId';
 String replyConsentKey(String bookId) => 'rtc_reply_consent_v2_$bookId';
+const localAiConsentKey = 'ai_consent_device';
+const localReplyConsentKey = 'rtc_reply_consent_device';
+
+Future<bool> hasLocalConsent(String key, String legacyKey) async {
+  final value = await secure.read(key: key);
+  return value == null
+      ? await secure.read(key: legacyKey) == 'yes'
+      : value == 'yes';
+}
+
+Future<bool> hasAiConsent(String bookId) =>
+    hasLocalConsent(localAiConsentKey, aiConsentKey(bookId));
+
+Future<bool> hasReplyConsent(String bookId) =>
+    hasLocalConsent(localReplyConsentKey, replyConsentKey(bookId));
 
 Future<bool> consent(BuildContext context, String personId) async {
-  final key = aiConsentKey(personId);
-  if (await secure.read(key: key) == 'yes') return true;
+  if (await hasAiConsent(personId)) return true;
   if (!context.mounted) return false;
   final yes = await showChatSheet<bool>(
     context: context,
@@ -972,7 +1101,9 @@ Future<bool> consent(BuildContext context, String personId) async {
             '发送的讲述和保留的原声会保存到 LifePages 服务。',
           ),
           const SizedBox(height: 8),
-          const Text('请先取得讲述者同意。您可在「我的 → 设置 → AI 数据授权」撤回本机授权。手动编辑书稿无需开启 AI。'),
+          const Text(
+            '同意后，本机新建的书籍也可使用 AI。请先取得讲述者同意。您可在「我的 → 设置 → AI 数据授权」撤回本机授权。手动编辑书稿无需开启 AI。',
+          ),
           TextButton(
             onPressed: () => AppLegalUrls.open(context, AppLegalUrls.privacy),
             child: const Text('查看隐私政策'),
@@ -992,7 +1123,7 @@ Future<bool> consent(BuildContext context, String personId) async {
     ),
   );
   if (yes == true) {
-    await secure.write(key: key, value: 'yes');
+    await secure.write(key: localAiConsentKey, value: 'yes');
   }
   return yes == true;
 }
@@ -1455,6 +1586,17 @@ class _ChapterPageState extends State<ChapterPage> {
   );
 }
 
+List<List<bool>> bookQrModules(String url) {
+  if (url.isEmpty) return const [];
+  final image = QrImage(
+    QrCode.fromData(data: url, errorCorrectLevel: QrErrorCorrectLevel.M),
+  );
+  return List.generate(
+    image.moduleCount,
+    (y) => List.generate(image.moduleCount, (x) => image.isDark(y, x)),
+  );
+}
+
 class QrPainter extends CustomPainter {
   final String data;
   QrPainter(this.data);
@@ -1490,6 +1632,7 @@ class BookPage extends StatefulWidget {
   final Api? client;
   final List<Map<String, dynamic>> chapters;
   final VoidCallback? onChaptersChanged;
+  final bool interview;
   const BookPage({
     super.key,
     required this.name,
@@ -1499,6 +1642,7 @@ class BookPage extends StatefulWidget {
     this.client,
     this.bookId,
     this.onChaptersChanged,
+    this.interview = false,
   });
 
   @override
@@ -1534,7 +1678,8 @@ class _BookPageState extends State<BookPage> {
           : (await client
                         .call(
                           'GET',
-                          '/api/books/$id/chapters?include_material=true',
+                          '/api/books/$id/chapters?include_material=true'
+                              '${widget.interview ? '&interview_only=true' : ''}',
                         )
                         .timeout(const Duration(seconds: 15))
                     as List)
@@ -1721,7 +1866,7 @@ class _BookPageState extends State<BookPage> {
   }
 
   String _chapterLabel(Map<String, dynamic> chapter, int index) {
-    if (widget.title == null) return '第 ${index + 1} 章';
+    if (widget.interview || widget.title == null) return '第 ${index + 1} 章';
     final number = chapter['topic_number'];
     return number == null ? '原有章节' : '第 $number 章';
   }
@@ -1747,8 +1892,10 @@ class _BookPageState extends State<BookPage> {
         context: context,
         builder: (sheet) => ChatSheetDialog(
           title: const Text('制作这本回忆录'),
-          content: const Text(
-            'AI 会整理未成稿的章节，已有正文会保留。PDF 的原声二维码可查看整章内容和对应提问，并收听录音。',
+          content: Text(
+            widget.interview
+                ? '用已保存的书稿生成 PDF。含原声的章节会附上二维码，可查看整章内容并收听录音。'
+                : 'AI 会整理未成稿的章节，已有正文会保留。PDF 的原声二维码可查看整章内容和对应提问，并收听录音。',
           ),
           actions: [
             TextButton(
@@ -1831,10 +1978,15 @@ class _BookPageState extends State<BookPage> {
     final exportChapters = <Map<String, dynamic>>[];
     for (final (index, chapter) in body.indexed) {
       final blocks = _blocks(chapter);
+      final url = widget.interview && !_hasAudio(chapter)
+          ? ''
+          : urls[chapter['id']] ?? '';
       exportChapters.add({
         'title': chapter['title'],
         'content': chapter['content'],
-        'url': urls[chapter['id']] ?? '',
+        'url': url,
+        if (defaultTargetPlatform == TargetPlatform.android)
+          'qr': bookQrModules(url),
         'label': _chapterLabel(chapter, index),
         if (blocks.any((block) => block['kind'] == 'image'))
           'blocks': [
@@ -1902,7 +2054,7 @@ class _BookPageState extends State<BookPage> {
                 : _editChapter,
             icon: const Icon(Icons.edit_outlined),
           ),
-        if (widget.bookId != null)
+        if (widget.bookId != null && supportsNativeBookExport)
           TextButton(
             onPressed: loading || busy || loadError != null || chapters.isEmpty
                 ? null
@@ -1930,7 +2082,7 @@ class _BookPageState extends State<BookPage> {
               ),
             ),
     ),
-    bottomNavigationBar: !chapters.any(_hasBody)
+    bottomNavigationBar: !supportsNativeBookExport || !chapters.any(_hasBody)
         ? null
         : SafeArea(
             top: false,
@@ -2080,7 +2232,7 @@ class _BookPageState extends State<BookPage> {
               ),
             );
           }),
-          if (chapters.any(_hasAudio)) ...[
+          if (supportsNativeBookExport && chapters.any(_hasAudio)) ...[
             const SizedBox(height: 20),
             const Text(
               '点「成书」可将各章录音加入 PDF 的原声二维码。',

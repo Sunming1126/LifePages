@@ -10,12 +10,13 @@ import 'package:record/record.dart';
 import 'package:uuid/uuid.dart';
 
 import 'chat_sheet.dart';
+import 'platform_capabilities.dart';
 import 'main.dart'
     show
         Api,
         ApiFailure,
         BookPage,
-        aiConsentKey,
+        hasAiConsent,
         consent,
         errorText,
         paper,
@@ -53,6 +54,7 @@ class ChapterOpening {
     String bookId, {
     Future<Directory> Function()? documentsDirectory,
     String? preferred,
+    bool interview = false,
   }) async {
     final last =
         preferred ??
@@ -65,10 +67,12 @@ class ChapterOpening {
         'editor': 'true',
         'include_manuscript': 'true',
         'preferred_id': ?last,
+        if (interview) 'interview_only': 'true',
       },
     ).query;
     final data = await client.call('GET', '$path?$query') as Map;
     final topics = _readRows(data['topics']);
+    if (topics.isEmpty) throw StateError('请先在访谈中整理并保存书稿');
     final initial =
         topics.where((row) => row['id'] == last).firstOrNull ??
         topics.where((row) => row['id'] == data['active_id']).firstOrNull ??
@@ -114,11 +118,13 @@ class ChapterEditor extends StatefulWidget {
     this.initialOpening,
     this.loadOpening,
     this.onOpeningChanged,
+    this.interview = false,
   });
 
   final String bookId, title, name;
   final String? author;
   final Api client;
+  final bool interview;
   final VoidCallback? onChaptersChanged;
   final Future<Directory> Function()? documentsDirectory;
   final VoiceCapture? voiceCapture;
@@ -166,7 +172,13 @@ class _ChapterEditorState extends State<ChapterEditor>
   String get _lastChapter => 'editor_chapter_${widget.bookId}';
 
   String _id() => const Uuid().v4().replaceAll('-', '');
-  String _label(_Row topic) => '第 ${topic['number']} 章 · ${topic['title']}';
+  String _label(_Row topic) {
+    final index = widget.interview
+        ? _topics.indexWhere((row) => row['id'] == topic['id'])
+        : -1;
+    return '第 ${index >= 0 ? index + 1 : topic['number']} 章 · ${topic['title']}';
+  }
+
   @override
   void initState() {
     super.initState();
@@ -234,6 +246,7 @@ class _ChapterEditorState extends State<ChapterEditor>
       widget.bookId,
       documentsDirectory: () => _documents,
       preferred: preferred,
+      interview: widget.interview,
     );
     if (mounted) _applyOpening(opening);
   }
@@ -261,6 +274,7 @@ class _ChapterEditorState extends State<ChapterEditor>
                 _client,
                 widget.bookId,
                 documentsDirectory: () => _documents,
+                interview: widget.interview,
               ));
       if (!mounted) return;
       if (cold) {
@@ -570,6 +584,7 @@ class _ChapterEditorState extends State<ChapterEditor>
           title: widget.title,
           author: widget.author,
           client: _client,
+          interview: widget.interview,
           onChaptersChanged: () {
             changed = true;
             widget.onChaptersChanged?.call();
@@ -779,7 +794,7 @@ class _ChapterEditorState extends State<ChapterEditor>
       _cancelVoice = false;
     });
     try {
-      if (await secure.read(key: aiConsentKey(widget.bookId)) != 'yes') {
+      if (!await hasAiConsent(widget.bookId)) {
         if (mounted && await consent(context, widget.bookId) && mounted) {
           showError(context, '请再长按一次开始录音');
         }
@@ -1245,30 +1260,33 @@ class _ChapterEditorState extends State<ChapterEditor>
             const SizedBox(height: 8),
             Row(
               children: [
-                Expanded(
-                  child: OutlinedButton.icon(
-                    onPressed: enabled ? _draft : null,
-                    style: OutlinedButton.styleFrom(
-                      minimumSize: const Size(0, 48),
-                      padding: const EdgeInsets.symmetric(horizontal: 8),
-                    ),
-                    icon: _actionIcon(
-                      _EditorAction.draft,
-                      Icons.auto_awesome_outlined,
-                    ),
-                    label: Text(
-                      _topic?['draft_id'] != null ? '查看本章草稿' : '整理本章内容',
+                if (!widget.interview || _topic?['draft_id'] != null)
+                  Expanded(
+                    child: OutlinedButton.icon(
+                      onPressed: enabled ? _draft : null,
+                      style: OutlinedButton.styleFrom(
+                        minimumSize: const Size(0, 48),
+                        padding: const EdgeInsets.symmetric(horizontal: 8),
+                      ),
+                      icon: _actionIcon(
+                        _EditorAction.draft,
+                        Icons.auto_awesome_outlined,
+                      ),
+                      label: Text(
+                        _topic?['draft_id'] != null ? '查看本章草稿' : '整理本章内容',
+                      ),
                     ),
                   ),
-                ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: _action(
-                    Icons.add_photo_alternate_outlined,
-                    '插入图片',
-                    enabled ? _pickPhoto : null,
+                if (supportsNativePhotos) ...[
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: _action(
+                      Icons.add_photo_alternate_outlined,
+                      '插入图片',
+                      enabled ? _pickPhoto : null,
+                    ),
                   ),
-                ),
+                ],
               ],
             ),
           ],

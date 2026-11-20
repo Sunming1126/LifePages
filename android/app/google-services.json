@@ -1,0 +1,55 @@
+{
+  "project_info": {
+    "project_number": "1074729383584",
+    "project_id": "lifepages-980b0",
+    "storage_bucket": "lifepages-980b0.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:1074729383584:android:b3d96a95eb08520ed3bbc5",
+        "android_client_info": {
+          "package_name": "com.caoyuming.lifepages"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "1074729383584-qtne28rpi2dhkdrfunuhcka646vhnq7f.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.caoyuming.lifepages",
+            "certificate_hash": "73baaa178949a6253d8860b940fbbf7f65780e49"
+          }
+        },
+        {
+          "client_id": "1074729383584-g0e1enrrikobdmvfhg1eubq271japkb6.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBC5J8UcjyGk4eWeWVDUmf3duLU9BrIUww"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "1074729383584-g0e1enrrikobdmvfhg1eubq271japkb6.apps.googleusercontent.com",
+              "client_type": 3
+            },
+            {
+              "client_id": "1074729383584-5r5982gderljok7sk0gp0q80ej34hilo.apps.googleusercontent.com",
+              "client_type": 2,
+              "ios_info": {
+                "bundle_id": "com.caoyuming.lifePages",
+                "app_store_id": "6833803513"
+              }
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
