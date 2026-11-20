@@ -336,6 +336,10 @@ class _ChatShellState extends State<ChatShell> {
       } catch (_) {
         if (mounted) showError(context, '音色选择暂时无法保存，请重试');
       }
+    } else if (selection == 'chat-outbox') {
+      await _chatKey.currentState?._openChapterOutbox();
+    } else if (selection == 'chat-topics') {
+      await _chatKey.currentState?._openTopics();
     } else if (selection == 'narrator') {
       final bookId = _activeId;
       try {
@@ -776,7 +780,7 @@ class _FreeChatPageState extends State<FreeChatPage>
     }
     final epoch = ++_warmEpoch;
     try {
-      if (await secure.read(key: replyConsentKey(widget.personId)) != 'yes') {
+      if (!await hasReplyConsent(widget.personId)) {
         return;
       }
       final voice = await ReplyVoice.load();
@@ -1299,7 +1303,7 @@ class _FreeChatPageState extends State<FreeChatPage>
 
   Future<void> _sendTurn(Map<String, dynamic> turn) async {
     if (!mounted || sending || _waitingForEarlierTurn(turn)) return;
-    if (await secure.read(key: aiConsentKey(widget.personId)) != 'yes') {
+    if (!await hasAiConsent(widget.personId)) {
       // Restored recordings wait for explicit approval on retry.
       if (turn['queued'] == true || !mounted) return;
       if (!await consent(context, widget.personId)) return;
@@ -1516,7 +1520,7 @@ class _FreeChatPageState extends State<FreeChatPage>
     if (!_handingOffOriginals.add(turn)) return;
     try {
       await persistOutbox();
-      if (await secure.read(key: aiConsentKey(widget.personId)) != 'yes') {
+      if (!await hasAiConsent(widget.personId)) {
         return;
       }
       final id = turn['audio_message_id'] as String;
@@ -1651,8 +1655,7 @@ class _FreeChatPageState extends State<FreeChatPage>
   }
 
   Future<bool> _ensureReplyAudio({required bool prompt}) async {
-    final key = replyConsentKey(widget.personId);
-    if (await secure.read(key: key) == 'yes') return true;
+    if (await hasReplyConsent(widget.personId)) return true;
     if (!prompt || !mounted || _allowReplyAudioPrompt) return false;
     _allowReplyAudioPrompt = true;
     try {
@@ -1691,7 +1694,7 @@ class _FreeChatPageState extends State<FreeChatPage>
         if (Platform.isAndroid) await saveAutomaticReplyAudio(false);
         return false;
       }
-      await secure.write(key: key, value: 'yes');
+      await secure.write(key: localReplyConsentKey, value: 'yes');
       unawaited(_preconnectReplyAudio());
       return true;
     } finally {
@@ -1763,7 +1766,7 @@ class _FreeChatPageState extends State<FreeChatPage>
   }
 
   Future<void> warmVoice() async {
-    if (await secure.read(key: aiConsentKey(widget.personId)) != 'yes') {
+    if (!await hasAiConsent(widget.personId)) {
       return;
     }
     try {
@@ -1929,7 +1932,7 @@ class _FreeChatPageState extends State<FreeChatPage>
     finishRequested = false;
     cancelZone = false;
     cancelledVoice = false;
-    if (await secure.read(key: aiConsentKey(widget.personId)) != 'yes') {
+    if (!await hasAiConsent(widget.personId)) {
       if (mounted) await consent(context, widget.personId);
       pointerDown = false;
       if (mounted) setState(() => starting = false);
@@ -2644,43 +2647,18 @@ class _FreeChatPageState extends State<FreeChatPage>
                         Row(
                           mainAxisAlignment: MainAxisAlignment.spaceBetween,
                           children: [
-                            if (!widget.interview || _visibleOutbox.isNotEmpty)
-                              Badge(
-                                isLabelVisible: _visibleOutbox.isNotEmpty,
-                                child: GlassIconButton(
-                                  key: ValueKey(
-                                    widget.interview
-                                        ? 'interview-outbox-button'
-                                        : 'assistant-history-button',
-                                  ),
-                                  size: 48,
-                                  iconSize: 26,
-                                  useOwnLayer: true,
-                                  glowColor: chatAccent.withValues(alpha: .18),
-                                  onPressed: _sessionId == null
-                                      ? null
-                                      : widget.interview
-                                      ? _openChapterOutbox
-                                      : _openTopics,
-                                  icon: Icon(
-                                    widget.interview
-                                        ? Icons.pending_outlined
-                                        : Icons.segment_rounded,
-                                    semanticLabel: widget.interview
-                                        ? '未完成的输入'
-                                        : null,
-                                  ),
-                                ),
-                              ),
-                            if (widget.interview && _visibleOutbox.isEmpty)
-                              const SizedBox(width: 48),
+                            const SizedBox(width: 48),
                             GlassIconButton(
                               key: const ValueKey('assistant-settings-button'),
                               size: 48,
                               iconSize: 26,
                               useOwnLayer: true,
                               glowColor: chatAccent.withValues(alpha: .18),
-                              onPressed: widget.onChooseBook,
+                              onPressed:
+                                  widget.onChooseBook ??
+                                  (widget.interview
+                                      ? _openChapterOutbox
+                                      : _openTopics),
                               icon: const Icon(
                                 Icons.tune_rounded,
                                 semanticLabel: '聊天设置',

@@ -1069,10 +1069,24 @@ class _AudioButtonState extends State<AudioButton> {
 
 String aiConsentKey(String bookId) => 'ai_consent_v2_$bookId';
 String replyConsentKey(String bookId) => 'rtc_reply_consent_v2_$bookId';
+const localAiConsentKey = 'ai_consent_device';
+const localReplyConsentKey = 'rtc_reply_consent_device';
+
+Future<bool> hasLocalConsent(String key, String legacyKey) async {
+  final value = await secure.read(key: key);
+  return value == null
+      ? await secure.read(key: legacyKey) == 'yes'
+      : value == 'yes';
+}
+
+Future<bool> hasAiConsent(String bookId) =>
+    hasLocalConsent(localAiConsentKey, aiConsentKey(bookId));
+
+Future<bool> hasReplyConsent(String bookId) =>
+    hasLocalConsent(localReplyConsentKey, replyConsentKey(bookId));
 
 Future<bool> consent(BuildContext context, String personId) async {
-  final key = aiConsentKey(personId);
-  if (await secure.read(key: key) == 'yes') return true;
+  if (await hasAiConsent(personId)) return true;
   if (!context.mounted) return false;
   final yes = await showChatSheet<bool>(
     context: context,
@@ -1087,7 +1101,9 @@ Future<bool> consent(BuildContext context, String personId) async {
             '发送的讲述和保留的原声会保存到 LifePages 服务。',
           ),
           const SizedBox(height: 8),
-          const Text('请先取得讲述者同意。您可在「我的 → 设置 → AI 数据授权」撤回本机授权。手动编辑书稿无需开启 AI。'),
+          const Text(
+            '同意后，本机新建的书籍也可使用 AI。请先取得讲述者同意。您可在「我的 → 设置 → AI 数据授权」撤回本机授权。手动编辑书稿无需开启 AI。',
+          ),
           TextButton(
             onPressed: () => AppLegalUrls.open(context, AppLegalUrls.privacy),
             child: const Text('查看隐私政策'),
@@ -1107,7 +1123,7 @@ Future<bool> consent(BuildContext context, String personId) async {
     ),
   );
   if (yes == true) {
-    await secure.write(key: key, value: 'yes');
+    await secure.write(key: localAiConsentKey, value: 'yes');
   }
   return yes == true;
 }

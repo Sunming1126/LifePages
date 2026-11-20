@@ -11,7 +11,7 @@ import 'bookshelf.dart' show BookRecord, showRecentlyDeleted;
 import 'chat_sheet.dart';
 import 'legal_urls.dart';
 import 'main.dart'
-    show Api, aiConsentKey, paper, replyConsentKey, secure, showError;
+    show Api, localAiConsentKey, localReplyConsentKey, paper, secure, showError;
 import 'membership/membership_sheet.dart';
 import 'reading_preferences.dart';
 
@@ -755,12 +755,12 @@ class _AIPrivacyPageState extends State<_AIPrivacyPage> {
   Future<void> _revoke() async {
     setState(() => _saving = true);
     try {
+      await secure.write(key: localAiConsentKey, value: 'no');
+      await secure.write(key: localReplyConsentKey, value: 'no');
+      replyAudioConsentRevision.value++;
       for (final book in widget.books) {
         final id = book['id'] as String;
-        await secure.delete(key: aiConsentKey(id));
-        await secure.delete(key: replyConsentKey(id));
         if (Platform.isAndroid) await widget.client.pauseVoiceUploads(id);
-        replyAudioConsentRevision.value++;
       }
       if (mounted) showError(context, '已撤回本机的聊天、转写与播报授权');
     } catch (error) {

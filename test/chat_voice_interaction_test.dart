@@ -888,7 +888,7 @@ void main() {
     await tester.enterText(find.byType(TextField), '留在第一章的草稿');
 
     Future<void> openSessionSheet() async {
-      await tester.tap(find.byKey(const ValueKey('assistant-history-button')));
+      await tester.tap(find.byKey(const ValueKey('assistant-settings-button')));
       await tester.pumpAndSettle();
       expect(find.text('章节目录'), findsOneWidget);
       final sheet = tester.getRect(

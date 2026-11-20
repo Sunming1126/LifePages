@@ -16,7 +16,7 @@ import 'main.dart'
         Api,
         ApiFailure,
         BookPage,
-        aiConsentKey,
+        hasAiConsent,
         consent,
         errorText,
         paper,
@@ -178,6 +178,7 @@ class _ChapterEditorState extends State<ChapterEditor>
         : -1;
     return '第 ${index >= 0 ? index + 1 : topic['number']} 章 · ${topic['title']}';
   }
+
   @override
   void initState() {
     super.initState();
@@ -793,7 +794,7 @@ class _ChapterEditorState extends State<ChapterEditor>
       _cancelVoice = false;
     });
     try {
-      if (await secure.read(key: aiConsentKey(widget.bookId)) != 'yes') {
+      if (!await hasAiConsent(widget.bookId)) {
         if (mounted && await consent(context, widget.bookId) && mounted) {
           showError(context, '请再长按一次开始录音');
         }
