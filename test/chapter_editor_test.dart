@@ -39,6 +39,7 @@ class ManuscriptApi extends Api {
   int manuscriptReads = 0;
   Completer<void>? suggestionGate;
   bool offline = false;
+  bool organizing = false;
 
   @override
   Future<dynamic> call(
@@ -94,6 +95,7 @@ class ManuscriptApi extends Api {
       }
       return {
         'active_id': 'a',
+        'organizing': organizing,
         'manuscript': rows[uri.queryParameters['preferred_id']] ?? rows['a'],
         'topics': rows.values.toList()
           ..sort((a, b) => (a['number'] as int).compareTo(b['number'] as int)),
@@ -114,6 +116,15 @@ class ManuscriptApi extends Api {
         row['blocks'] = jsonDecode(jsonEncode(body['blocks']));
         row['revision'] = (row['revision'] as int) + 1;
       }
+      return Map<String, dynamic>.of(row);
+    }
+    if (uri.path.endsWith('/organize')) {
+      expect(body!['revision'], row['revision']);
+      row['title'] = '石桥边的清晨';
+      row['revision'] = (row['revision'] as int) + 1;
+      row['blocks'] = [
+        {'id': 'organized', 'kind': 'text', 'text': '整理后的完整章节。'},
+      ];
       return Map<String, dynamic>.of(row);
     }
     if (uri.path.endsWith('/suggest')) {
@@ -142,11 +153,79 @@ Future<void> flushEditor(WidgetTester tester) async {
 }
 
 void main() {
+  testWidgets(
+    'automatic chapter appears in directory without reopening editor',
+    (tester) async {
+      FlutterSecureStorage.setMockInitialValues({});
+      final dir = Directory.systemTemp.createTempSync(
+        'lifepages-auto-directory-',
+      );
+      addTearDown(() => dir.deleteSync(recursive: true));
+      final api = ManuscriptApi(hasBody: true)..organizing = true;
+      await tester.pumpWidget(
+        MaterialApp(
+          home: ChapterEditor(
+            name: '测试',
+            bookId: 'book',
+            title: '虚构书',
+            interview: true,
+            client: api,
+            documentsDirectory: () async => dir,
+          ),
+        ),
+      );
+      await flushEditor(tester);
+      expect(find.text('正在自动整理已完成的章节，完成后会显示在章节目录中。'), findsOneWidget);
+      api.rows['b']!['title'] = '自动生成的新章名';
+      api.organizing = false;
+      await tester.pump(const Duration(seconds: 2));
+      await flushEditor(tester);
+      await tester.tap(find.text('第 1 章 · 故乡'));
+      await tester.pumpAndSettle();
+      expect(find.text('第 2 章 · 自动生成的新章名'), findsOneWidget);
+      await tester.pumpWidget(const SizedBox.shrink());
+    },
+  );
+
+  testWidgets(
+    'interview chapter can organize title and body from editor',
+    (tester) async {
+      FlutterSecureStorage.setMockInitialValues({});
+      final dir = Directory.systemTemp.createTempSync('lifepages-organize-');
+      addTearDown(() => dir.deleteSync(recursive: true));
+      await tester.pumpWidget(
+        MaterialApp(
+          home: ChapterEditor(
+            name: '测试',
+            bookId: 'book',
+            title: '虚构书',
+            interview: true,
+            client: ManuscriptApi(hasBody: true),
+            documentsDirectory: () async => dir,
+          ),
+        ),
+      );
+      await flushEditor(tester);
+      expect(find.text('整理本章'), findsOneWidget);
+      await tester.tap(find.text('整理本章'));
+      await flushEditor(tester);
+      expect(find.text('整理后的完整章节。'), findsOneWidget);
+      expect(find.text('第 1 章 · 石桥边的清晨'), findsOneWidget);
+      await tester.pumpWidget(const SizedBox.shrink());
+    },
+    variant: TargetPlatformVariant({
+      TargetPlatform.iOS,
+      TargetPlatform.android,
+    }),
+  );
+
   for (final hasBody in [false, true]) {
     testWidgets(
       'chapter editor restores the last chapter with existing body: $hasBody',
       (tester) async {
-        FlutterSecureStorage.setMockInitialValues({'ai_consent_v2_book': 'yes'});
+        FlutterSecureStorage.setMockInitialValues({
+          'ai_consent_v2_book': 'yes',
+        });
         final dir = Directory.systemTemp.createTempSync('lifepages-editor-');
         addTearDown(() => dir.deleteSync(recursive: true));
         final client = ManuscriptApi(hasBody: hasBody);
@@ -177,7 +256,7 @@ void main() {
         expect(find.byType(ChapterEditor), findsOneWidget);
         expect(client.manuscriptReads, 0);
         expect(find.text('添加文字'), findsNothing);
-        expect(find.text('整理本章内容'), findsOneWidget);
+        expect(find.text('整理本章'), findsOneWidget);
         expect(find.text('第 1 章 · 故乡'), findsOneWidget);
         expect(find.text('AI 整理的正文。'), hasBody ? findsOneWidget : findsNothing);
         expect(find.text('从一个画面、一句话或一个人开始写……'), findsOneWidget);
@@ -215,6 +294,7 @@ void main() {
           expect(find.text('您最想从这段经历的哪一幕说起？'), findsOneWidget);
         }
       },
+      variant: TargetPlatformVariant.only(TargetPlatform.iOS),
     );
   }
 
@@ -345,5 +425,6 @@ void main() {
       expect((exported['blocks'] as List).first['image'], base64Encode(sample));
       expect((exported['blocks'] as List).last['text'], '更口语的正文。');
     },
+    variant: TargetPlatformVariant.only(TargetPlatform.iOS),
   );
 }

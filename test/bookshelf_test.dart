@@ -2,13 +2,15 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart' show defaultTargetPlatform;
 import 'package:flutter/services.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:life_pages/chat_shell.dart';
 import 'package:life_pages/chapter_editor.dart';
-import 'package:life_pages/bookshelf.dart' show newBookSheet;
-import 'package:life_pages/main.dart' show Api, BookPage, paper, secure;
+import 'package:life_pages/bookshelf.dart' show newBookSheet, Bookshelf;
+import 'package:life_pages/main.dart'
+    show Api, BookPage, paper, secure, bookQrModules;
 import 'package:life_pages/book_cover.dart';
 
 class ShelfApi extends Api {
@@ -29,6 +31,7 @@ class ShelfApi extends Api {
   Completer<List<Map<String, dynamic>>>? previewResponse;
   Completer<void>? editorGate;
   int editorRequests = 0;
+  bool? editorInterviewOnly;
   int editorRevision = 0;
   String editorText = '这是已保存的正文。';
   final previewRows = <Map<String, dynamic>>[];
@@ -121,6 +124,7 @@ class ShelfApi extends Api {
       final editor = uri.queryParameters['editor'] == 'true';
       if (editor) {
         editorRequests++;
+        editorInterviewOnly = uri.queryParameters['interview_only'] == 'true';
         await editorGate?.future;
       }
       return {
@@ -170,79 +174,161 @@ Future<void> settleShelf(WidgetTester tester) async {
   await tester.pumpAndSettle();
 }
 
+class InterviewShelfApi extends ShelfApi {
+  InterviewShelfApi() {
+    books.single['interview_version'] = 1;
+  }
+
+  bool saved = false;
+
+  @override
+  Future<dynamic> call(
+    String method,
+    String path, [
+    Map<String, dynamic>? body,
+  ]) async {
+    switch (path) {
+      case '/api/books/first/interview':
+        expect(method, 'POST');
+        return {
+          'active_id': 'interview-session',
+          'interview': {
+            'question': 2,
+            'total': 30,
+            'revision': 2,
+            'can_draft': true,
+          },
+          'messages': [
+            {'id': 'assistant', 'role': 'assistant', 'text': '您还记得小时候的玩伴吗？'},
+          ],
+        };
+      case '/api/books/first/interview/draft':
+        expect(method, 'POST');
+        return {
+          'draft': {
+            'id': 'draft-one',
+            'chapters': [
+              {'title': '井台边', 'body': '我曾在井台边捏泥人。'},
+            ],
+          },
+        };
+      case '/api/books/first/interview/draft/draft-one':
+        expect(method, 'PUT');
+        expect(body?['chapters'], [
+          {'title': '童年的井台', 'body': '我曾在井台边捏泥人。'},
+        ]);
+        saved = true;
+        return {
+          'chapter_ids': ['chapter-one'],
+        };
+      case '/api/people/first?session_id=interview-session':
+        return {
+          'interview': {
+            'question': 2,
+            'total': 30,
+            'revision': 2,
+            'can_draft': false,
+          },
+          'messages': [],
+        };
+    }
+    expect(path, isNot(contains('/topics')));
+    return super.call(method, path, body);
+  }
+}
+
+class EmptyInterviewShelfApi extends ShelfApi {
+  EmptyInterviewShelfApi() {
+    books.single['interview_version'] = 2;
+  }
+  @override
+  Future<dynamic> call(
+    String method,
+    String path, [
+    Map<String, dynamic>? body,
+  ]) {
+    if (method == 'GET' && Uri.parse(path).path == '/api/books/first/topics') {
+      return Future.value({
+        'topics': [
+          {
+            'id': 'blank',
+            'number': 1,
+            'title': '未命名章节',
+            'theme': '手写草稿',
+            'question': '可以直接写下您想记录的内容。',
+          },
+        ],
+        'active_id': 'blank',
+        'manuscript': {
+          'id': 'blank',
+          'number': 1,
+          'title': '未命名章节',
+          'theme': '手写草稿',
+          'question': '可以直接写下您想记录的内容。',
+          'revision': 0,
+          'blocks': [],
+          'draft_id': null,
+          'has_narrations': false,
+        },
+      });
+    }
+    return super.call(method, path, body);
+  }
+}
+
 void main() {
-  testWidgets('new book previews a template before choosing it', (
-    tester,
-  ) async {
-    final client = ShelfApi();
-    Map<String, dynamic>? submitted;
-    await tester.pumpWidget(
-      MaterialApp(
-        home: Scaffold(
-          body: Builder(
-            builder: (context) => TextButton(
-              onPressed: () async =>
-                  submitted = await newBookSheet(context, client),
-              child: const Text('打开新建'),
-            ),
+  testWidgets(
+    'interview opens one conversation and can edit before saving a book draft',
+    (tester) async {
+      FlutterSecureStorage.setMockInitialValues({'ai_consent_v2_first': 'yes'});
+      final client = InterviewShelfApi();
+      final directory = Directory.systemTemp.createTempSync(
+        'lifepages-interview-',
+      );
+      addTearDown(() => directory.delete(recursive: true));
+      await tester.pumpWidget(
+        MaterialApp(
+          home: ChatShell(
+            client: client,
+            documentsDirectory: () async => directory,
           ),
         ),
-      ),
-    );
-    await tester.tap(find.text('打开新建'));
-    await tester.pumpAndSettle();
-    expect(find.text('完整人生（26 章）'), findsOneWidget);
-    await tester.tap(find.text('章节模板'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('家庭故事（2 章）'));
-    await tester.pumpAndSettle();
-    expect(find.text('第 1 章 · 家族来历'), findsOneWidget);
-    await tester.tap(find.text('使用这套模板'));
-    await tester.pumpAndSettle();
-    expect(find.text('家庭故事（2 章）'), findsOneWidget);
-    for (final (index, text) in ['家族回忆', '奶奶', '小林'].indexed) {
-      await tester.enterText(find.byType(TextFormField).at(index), text);
-    }
-    await tester.tap(find.text('创建书籍'));
-    await tester.pumpAndSettle();
-    expect(submitted?['template_id'], 'family');
-  });
+      );
+      await settleShelf(tester);
+      expect(
+        find.byKey(const ValueKey('assistant-history-button')),
+        findsNothing,
+      );
+      expect(find.text('访谈 2 / 30'), findsNothing);
+      expect(find.byKey(const ValueKey('next-chapter-button')), findsOneWidget);
+      await tester.tap(find.text('整理成书'));
+      await tester.pumpAndSettle();
+      expect(find.text('书稿草稿'), findsOneWidget);
+      await tester.enterText(
+        find.byKey(const ValueKey('draft-title-0')),
+        '童年的井台',
+      );
+      await tester.tap(find.text('保存到书架'));
+      await tester.pumpAndSettle();
+      expect(client.saved, isTrue);
+      expect(find.text('书稿草稿'), findsNothing);
+      expect(find.text('整理成书'), findsNothing);
+    },
+    variant: TargetPlatformVariant.only(TargetPlatform.android),
+  );
 
-  testWidgets('book preview shows raw stories and opens the finished PDF', (
+  testWidgets('interview export numbers the visible chapters in order', (
     tester,
   ) async {
-    FlutterSecureStorage.setMockInitialValues({'ai_consent_v2_first': 'yes'});
-    final client = ShelfApi();
-    client.previewRows.addAll([
-      {
-        'id': 'topic-1',
-        'topic_id': 'topic-1',
-        'topic_number': 1,
-        'title': '聊过的章节',
-        'content': '',
-        'has_audio': true,
-        'audio_count': 2,
-        'narrations': [
-          {'id': 'm1', 'text': '我小时候住在河边。', 'has_audio': true},
-        ],
-      },
-      {
-        'id': 'existing',
-        'topic_number': 2,
-        'title': '已成稿章节',
-        'content': '我手工编辑过的正文。',
+    FlutterSecureStorage.setMockInitialValues({});
+    final client = ShelfApi()
+      ..previewRows.add({
+        'id': 'finished',
+        'topic_number': 27,
+        'title': '井台边',
+        'content': '这是第一章。',
         'has_audio': false,
-      },
-    ]);
-    final messenger =
-        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
-    const printChannel = MethodChannel('life_pages/print');
-    MethodCall? export;
-    messenger.setMockMethodCallHandler(printChannel, (call) async {
-      export = call;
-      return null;
-    });
-    addTearDown(() => messenger.setMockMethodCallHandler(printChannel, null));
+      });
     await tester.pumpWidget(
       MaterialApp(
         home: BookPage(
@@ -250,321 +336,490 @@ void main() {
           bookId: 'first',
           title: '我的回忆录',
           client: client,
+          interview: true,
         ),
       ),
     );
     await tester.pumpAndSettle();
-    expect(find.text('第 1 章 · 已讲述，待整理'), findsOneWidget);
-    expect(find.text('我小时候住在河边。'), findsOneWidget);
-    expect(find.text('播放原声'), findsOneWidget);
-    await tester.tap(find.text('成书'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('开始成书'));
-    await tester.pumpAndSettle();
-    expect(client.compiledTopics, ['topic-1']);
-    expect(client.exportShares, [
-      '/api/chapters/compiled/share?include_topic_audio=true',
-    ]);
-    expect(export?.method, 'previewBook');
-    final chapters = (export!.arguments as Map)['chapters'] as List;
-    expect(chapters.map((chapter) => chapter['content']), [
-      'AI 整理后的正文。',
-      '我手工编辑过的正文。',
-    ]);
-    expect(chapters.map((chapter) => chapter['url']), [
-      'https://test/listen/exported',
-      '',
-    ]);
-  });
-
-  testWidgets('shelf creates, switches, trashes and restores books', (
-    tester,
-  ) async {
-    FlutterSecureStorage.setMockInitialValues({});
-    final dir = Directory.systemTemp.createTempSync('lifepages-shelf-');
-    addTearDown(() => dir.deleteSync(recursive: true));
-    final client = ShelfApi();
-    await tester.pumpWidget(
-      MaterialApp(
-        home: ChatShell(client: client, documentsDirectory: () async => dir),
-      ),
-    );
-    await settleShelf(tester);
-    expect(find.text('我的回忆录'), findsOneWidget);
-    expect(find.text('您记忆中的故乡是什么样的？'), findsOneWidget);
-    final nav = find.byType(OneSayChatNavigation);
-    final shelfTab = find.descendant(of: nav, matching: find.text('书架'));
-    await tester.tap(shelfTab.first);
-    await settleShelf(tester);
-    final recentlyDeleted = find.text('最近删除').hitTestable();
-    await tester.tap(recentlyDeleted);
-    await tester.pumpAndSettle();
-    expect(find.text('还没有删除的书籍'), findsOneWidget);
-    await tester.binding.handlePopRoute();
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('新建一本书'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('创建书籍'));
-    await tester.pumpAndSettle();
-    expect(find.text('请填写作者'), findsOneWidget);
-    final fields = find.byType(TextFormField);
-    await tester.enterText(fields.at(0), '奶奶的岁月');
-    await tester.enterText(fields.at(1), '奶奶');
-    await tester.enterText(fields.at(2), '小林');
-    await tester.tap(find.text('创建书籍'));
-    await settleShelf(tester);
-    expect(find.text('奶奶的岁月'), findsOneWidget);
-
-    final settings = find.byKey(const ValueKey('assistant-settings-button'));
-    final voiceMenu = find.text('AI 播报音色');
-    final vivi = find.byKey(const ValueKey('reply-voice-vivi'));
-    final yunzhou = find.byKey(const ValueKey('reply-voice-yunzhou'));
-    await tester.tap(settings);
-    await tester.pumpAndSettle();
-    expect(find.text('切换书籍'), findsOneWidget);
-    expect(find.text('讲述者设置'), findsOneWidget);
-    expect(vivi, findsNothing);
-    expect(yunzhou, findsNothing);
-    await tester.tap(voiceMenu);
-    await tester.pumpAndSettle();
-    expect(find.text('切换书籍'), findsNothing);
-    expect(find.text('女声'), findsNWidgets(2));
-    expect(find.text('男声'), findsNWidgets(2));
-    expect(tester.widget<ListTile>(vivi).selected, isTrue);
-    await tester.tap(yunzhou);
-    await tester.pumpAndSettle();
-    expect(await secure.read(key: 'rtc_reply_voice'), 'yunzhou');
-    await tester.tap(settings);
-    await tester.pumpAndSettle();
-    expect(find.text('云舟'), findsOneWidget);
-    expect(yunzhou, findsNothing);
-    await tester.tap(voiceMenu);
-    await tester.pumpAndSettle();
-    expect(tester.widget<ListTile>(yunzhou).selected, isTrue);
-    await tester.tap(find.byTooltip('返回切换书籍'));
-    await tester.pumpAndSettle();
-    expect(find.text('切换书籍'), findsOneWidget);
-    await tester.tap(find.text('我的回忆录'));
-    await settleShelf(tester);
-    expect(client.active, 'first');
-    await tester.tap(shelfTab.first);
-    await settleShelf(tester);
-    final tile = find.ancestor(
-      of: find.text('奶奶的岁月').last,
-      matching: find.byType(Card),
-    );
-    await tester.tap(
-      find.descendant(of: tile, matching: find.byTooltip('书籍选项')),
-    );
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('删除书籍'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('移入最近删除'));
-    await settleShelf(tester);
-    expect(find.text('奶奶的岁月'), findsNothing);
-    await tester.tap(recentlyDeleted);
-    await tester.pumpAndSettle();
-    expect(find.text('奶奶的岁月'), findsOneWidget);
-    await tester.tap(find.text('恢复'));
-    await settleShelf(tester);
-    expect(find.text('0/26 章 · 0 字'), findsNWidgets(2));
+    expect(find.text('第 1 章'), findsWidgets);
+    expect(find.text('第 27 章'), findsNothing);
   });
 
   testWidgets(
-    'cold entry opens immediately and reentry shows cached text while offline',
+    'empty interview book cover opens editor instead of chat',
     (tester) async {
       FlutterSecureStorage.setMockInitialValues({});
-      final dir = Directory.systemTemp.createTempSync('lifepages-prefetch-');
+      final directory = Directory.systemTemp.createTempSync(
+        'lifepages-blank-editor-',
+      );
+      addTearDown(() => directory.delete(recursive: true));
+      final client = EmptyInterviewShelfApi();
+      var continued = false;
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: Bookshelf(
+              documentsDirectory: () async => directory,
+              books: client.books,
+              activeId: 'first',
+              client: client,
+              busy: false,
+              onCreate: () {},
+              onRecentlyDeleted: () {},
+              onRename: (_, _) async {},
+              onChaptersChanged: (_) {},
+              onDelete: (_) {},
+              onContinue: (_) => continued = true,
+            ),
+          ),
+        ),
+      );
+      await tester.tap(find.byType(BookCover).first);
+      await settleShelf(tester);
+      expect(find.byType(ChapterEditor), findsOneWidget);
+      expect(find.textContaining('未命名章节'), findsWidgets);
+      expect(find.text('AI 文字'), findsOneWidget);
+      expect(find.text('从一个画面、一句话或一个人开始写……'), findsOneWidget);
+      expect(continued, isFalse);
+      expect(find.text('重试'), findsNothing);
+    },
+    variant: TargetPlatformVariant({
+      TargetPlatform.iOS,
+      TargetPlatform.android,
+    }),
+  );
+
+  testWidgets(
+    'new book previews a template before choosing it',
+    (tester) async {
+      final client = ShelfApi();
+      Map<String, dynamic>? submitted;
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: Builder(
+              builder: (context) => TextButton(
+                onPressed: () async =>
+                    submitted = await newBookSheet(context, client),
+                child: const Text('打开新建'),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.tap(find.text('打开新建'));
+      await tester.pumpAndSettle();
+      expect(find.text('完整人生（26 章）'), findsOneWidget);
+      await tester.tap(find.text('章节模板'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('家庭故事（2 章）'));
+      await tester.pumpAndSettle();
+      expect(find.text('第 1 章 · 家族来历'), findsOneWidget);
+      await tester.tap(find.text('使用这套模板'));
+      await tester.pumpAndSettle();
+      expect(find.text('家庭故事（2 章）'), findsOneWidget);
+      for (final (index, text) in ['家族回忆', '奶奶', '小林'].indexed) {
+        await tester.enterText(find.byType(TextFormField).at(index), text);
+      }
+      await tester.tap(find.text('创建书籍'));
+      await tester.pumpAndSettle();
+      expect(submitted?['template_id'], 'family');
+    },
+    variant: TargetPlatformVariant.only(TargetPlatform.iOS),
+  );
+
+  testWidgets(
+    'book preview shows raw stories and opens the finished PDF',
+    (tester) async {
+      FlutterSecureStorage.setMockInitialValues({'ai_consent_v2_first': 'yes'});
+      final client = ShelfApi();
+      client.previewRows.addAll([
+        {
+          'id': 'topic-1',
+          'topic_id': 'topic-1',
+          'topic_number': 1,
+          'title': '聊过的章节',
+          'content': '',
+          'has_audio': true,
+          'audio_count': 2,
+          'narrations': [
+            {'id': 'm1', 'text': '我小时候住在河边。', 'has_audio': true},
+          ],
+        },
+        {
+          'id': 'existing',
+          'topic_number': 2,
+          'title': '已成稿章节',
+          'content': '我手工编辑过的正文。',
+          'has_audio': false,
+        },
+      ]);
+      final messenger =
+          TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+      const printChannel = MethodChannel('life_pages/print');
+      MethodCall? export;
+      messenger.setMockMethodCallHandler(printChannel, (call) async {
+        export = call;
+        return null;
+      });
+      addTearDown(() => messenger.setMockMethodCallHandler(printChannel, null));
+      await tester.pumpWidget(
+        MaterialApp(
+          home: BookPage(
+            name: '您',
+            bookId: 'first',
+            title: '我的回忆录',
+            client: client,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('第 1 章 · 已讲述，待整理'), findsOneWidget);
+      expect(find.text('我小时候住在河边。'), findsOneWidget);
+      expect(find.text('播放原声'), findsOneWidget);
+      await tester.tap(find.text('成书'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('开始成书'));
+      await tester.pumpAndSettle();
+      expect(client.compiledTopics, ['topic-1']);
+      expect(client.exportShares, [
+        '/api/chapters/compiled/share?include_topic_audio=true',
+      ]);
+      expect(export?.method, 'previewBook');
+      final chapters = (export!.arguments as Map)['chapters'] as List;
+      expect(chapters.map((chapter) => chapter['content']), [
+        'AI 整理后的正文。',
+        '我手工编辑过的正文。',
+      ]);
+      expect(chapters.map((chapter) => chapter['url']), [
+        'https://test/listen/exported',
+        '',
+      ]);
+      if (defaultTargetPlatform == TargetPlatform.android) {
+        expect(
+          chapters.first['qr'],
+          bookQrModules('https://test/listen/exported'),
+        );
+        expect(chapters.last['qr'], isEmpty);
+      }
+    },
+    variant: TargetPlatformVariant({
+      TargetPlatform.iOS,
+      TargetPlatform.android,
+    }),
+  );
+
+  testWidgets(
+    'shelf creates, switches, trashes and restores books',
+    (tester) async {
+      FlutterSecureStorage.setMockInitialValues({});
+      final dir = Directory.systemTemp.createTempSync('lifepages-shelf-');
       addTearDown(() => dir.deleteSync(recursive: true));
-      final gate = Completer<void>();
-      final client = ShelfApi()..editorGate = gate;
+      final client = ShelfApi();
       await tester.pumpWidget(
         MaterialApp(
           home: ChatShell(client: client, documentsDirectory: () async => dir),
         ),
       );
       await settleShelf(tester);
-      expect(client.editorRequests, 1);
+      expect(find.text('我的回忆录'), findsOneWidget);
+      expect(find.text('您记忆中的故乡是什么样的？'), findsOneWidget);
+      final nav = find.byType(OneSayChatNavigation);
+      final shelfTab = find.descendant(of: nav, matching: find.text('书架'));
+      await tester.tap(shelfTab.first);
+      await settleShelf(tester);
+      final recentlyDeleted = find.text('最近删除').hitTestable();
+      await tester.tap(recentlyDeleted);
+      await tester.pumpAndSettle();
+      expect(find.text('还没有删除的书籍'), findsOneWidget);
+      await tester.binding.handlePopRoute();
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('新建一本书'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('创建书籍'));
+      await tester.pumpAndSettle();
+      expect(find.text('请填写作者'), findsOneWidget);
+      final fields = find.byType(TextFormField);
+      await tester.enterText(fields.at(0), '奶奶的岁月');
+      await tester.enterText(fields.at(1), '奶奶');
+      await tester.enterText(fields.at(2), '小林');
+      await tester.tap(find.text('创建书籍'));
+      await settleShelf(tester);
+      expect(find.text('奶奶的岁月'), findsOneWidget);
+
+      final settings = find.byKey(const ValueKey('assistant-settings-button'));
+      final voiceMenu = find.text('AI 播报音色');
+      final vivi = find.byKey(const ValueKey('reply-voice-vivi'));
+      final yunzhou = find.byKey(const ValueKey('reply-voice-yunzhou'));
+      await tester.tap(settings);
+      await tester.pumpAndSettle();
+      expect(find.text('切换书籍'), findsOneWidget);
+      expect(find.text('讲述者设置'), findsOneWidget);
+      expect(vivi, findsNothing);
+      expect(yunzhou, findsNothing);
+      await tester.tap(voiceMenu);
+      await tester.pumpAndSettle();
+      expect(find.text('切换书籍'), findsNothing);
+      expect(find.text('女声'), findsNWidgets(2));
+      expect(find.text('男声'), findsNWidgets(2));
+      expect(tester.widget<ListTile>(vivi).selected, isTrue);
+      await tester.tap(yunzhou);
+      await tester.pumpAndSettle();
+      expect(await secure.read(key: 'rtc_reply_voice'), 'yunzhou');
+      await tester.tap(settings);
+      await tester.pumpAndSettle();
+      expect(find.text('云舟'), findsOneWidget);
+      expect(yunzhou, findsNothing);
+      await tester.tap(voiceMenu);
+      await tester.pumpAndSettle();
+      expect(tester.widget<ListTile>(yunzhou).selected, isTrue);
+      await tester.tap(find.byTooltip('返回切换书籍'));
+      await tester.pumpAndSettle();
+      expect(find.text('切换书籍'), findsOneWidget);
+      await tester.tap(find.text('我的回忆录'));
+      await settleShelf(tester);
+      expect(client.active, 'first');
+      await tester.tap(shelfTab.first);
+      await settleShelf(tester);
+      final tile = find.ancestor(
+        of: find.text('奶奶的岁月').last,
+        matching: find.byType(Card),
+      );
+      await tester.tap(
+        find.descendant(of: tile, matching: find.byTooltip('书籍选项')),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('删除书籍'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('移入最近删除'));
+      await settleShelf(tester);
+      expect(find.text('奶奶的岁月'), findsNothing);
+      await tester.tap(recentlyDeleted);
+      await tester.pumpAndSettle();
+      expect(find.text('奶奶的岁月'), findsOneWidget);
+      await tester.tap(find.text('恢复'));
+      await settleShelf(tester);
+      expect(find.text('0/26 章 · 0 字'), findsNWidgets(2));
+    },
+    variant: TargetPlatformVariant.only(TargetPlatform.iOS),
+  );
+
+  for (final interview in [false, true]) {
+    testWidgets(
+      'immediate editor and offline cache; interview=$interview',
+      (tester) async {
+        FlutterSecureStorage.setMockInitialValues({});
+        final dir = Directory.systemTemp.createTempSync('lifepages-prefetch-');
+        addTearDown(() => dir.deleteSync(recursive: true));
+        final gate = Completer<void>();
+        final client = ShelfApi()..editorGate = gate;
+        if (interview) client.books.single['interview_version'] = 2;
+        await tester.pumpWidget(
+          MaterialApp(
+            home: ChatShell(
+              client: client,
+              documentsDirectory: () async => dir,
+            ),
+          ),
+        );
+        await settleShelf(tester);
+        expect(client.editorRequests, 1);
+        expect(client.editorInterviewOnly, interview);
+        final nav = find.byType(OneSayChatNavigation);
+        await tester.tap(
+          find.descendant(of: nav, matching: find.text('书架')).first,
+        );
+        await tester.pumpAndSettle();
+        await tester.tap(find.byType(BookCover));
+        await tester.pump();
+        final editor = find.byType(ChapterEditor);
+        expect(editor, findsOneWidget);
+        expect(
+          find.descendant(
+            of: editor,
+            matching: find.byType(CircularProgressIndicator),
+          ),
+          findsNothing,
+        );
+        expect(client.editorRequests, 1);
+        gate.complete();
+        await settleShelf(tester);
+        expect(find.text('这是已保存的正文。'), findsOneWidget);
+        await tester.tap(find.byType(BackButton));
+        await tester.pumpAndSettle();
+        final retry = Completer<void>();
+        client.editorGate = retry;
+        await tester.tap(find.byType(BookCover));
+        await tester.pump();
+        expect(find.text('这是已保存的正文。'), findsOneWidget);
+        expect(client.editorRequests, 2);
+        retry.completeError(Exception('临时离线'));
+        await tester.pumpAndSettle();
+        expect(find.text('这是已保存的正文。'), findsOneWidget);
+
+        await tester.tap(find.byType(BackButton));
+        await tester.pumpAndSettle();
+        final delayed = Completer<void>();
+        client.editorGate = delayed;
+        await tester.tap(find.byType(BookCover));
+        await tester.pumpAndSettle();
+        await tester.enterText(find.byType(TextFormField), '刚刚写下的新内容。');
+        client
+          ..editorRevision = 1
+          ..editorText = '另一台设备写下的内容。';
+        delayed.complete();
+        await settleShelf(tester);
+        expect(find.text('刚刚写下的新内容。'), findsOneWidget);
+        // Leaving awaits the local draft write before Windows removes its file.
+        await tester.pageBack();
+        await settleShelf(tester);
+        await tester.pumpWidget(const SizedBox.shrink());
+      },
+      variant: TargetPlatformVariant({
+        TargetPlatform.iOS,
+        TargetPlatform.android,
+      }),
+    );
+  }
+
+  testWidgets(
+    'shelf opens editor directly, with preview in the book menu',
+    (tester) async {
+      FlutterSecureStorage.setMockInitialValues({
+        'share_c1': 'https://test/listen/one',
+      });
+      final dir = Directory.systemTemp.createTempSync('lifepages-preview-');
+      addTearDown(() => dir.deleteSync(recursive: true));
+      final client = ShelfApi()
+        ..previewResponse = Completer<List<Map<String, dynamic>>>();
+      client.books.add({
+        ...client.books.first,
+        'id': 'other',
+        'title': '另一本',
+        'author': '讲述人',
+      });
+      await tester.pumpWidget(
+        MaterialApp(
+          home: ChatShell(client: client, documentsDirectory: () async => dir),
+        ),
+      );
+      await settleShelf(tester);
       final nav = find.byType(OneSayChatNavigation);
       await tester.tap(
         find.descendant(of: nav, matching: find.text('书架')).first,
       );
       await tester.pumpAndSettle();
-      await tester.tap(find.byType(BookCover));
-      await tester.pumpAndSettle();
-      final editor = find.byType(ChapterEditor);
-      expect(editor, findsOneWidget);
-      expect(
-        find.descendant(
-          of: editor,
-          matching: find.byType(CircularProgressIndicator),
-        ),
-        findsNothing,
+      final otherCard = find.byType(Card).last;
+      await tester.tap(
+        find.descendant(of: otherCard, matching: find.byType(BookCover)),
       );
-      expect(client.editorRequests, 1);
-      gate.complete();
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
       await settleShelf(tester);
-      expect(find.text('这是已保存的正文。'), findsOneWidget);
-      await tester.tap(find.byType(BackButton));
+      expect(find.widgetWithText(AppBar, '另一本'), findsOneWidget);
+      expect(find.byType(ChapterEditor), findsOneWidget);
+      final header = tester.widget<AppBar>(find.byType(AppBar));
+      expect(header.backgroundColor, paper);
+      expect(header.scrolledUnderElevation, 0);
+      expect(find.byType(BookPage), findsNothing);
+      expect(find.text('第 1 章 · 故乡的轮廓'), findsOneWidget);
+      expect(client.active, 'first');
+      await tester.pageBack();
       await tester.pumpAndSettle();
-      final retry = Completer<void>();
-      client.editorGate = retry;
-      await tester.tap(find.byType(BookCover));
+      await tester.tap(
+        find.descendant(
+          of: find.byType(Card).last,
+          matching: find.byTooltip('书籍选项'),
+        ),
+      );
       await tester.pumpAndSettle();
-      expect(find.text('这是已保存的正文。'), findsOneWidget);
-      expect(client.editorRequests, 2);
-      retry.completeError(Exception('临时离线'));
-      await tester.pumpAndSettle();
-      expect(find.text('这是已保存的正文。'), findsOneWidget);
+      await tester.tap(find.text('预览全书'));
 
-      await tester.tap(find.byType(BackButton));
+      client.previewResponse!.complete([
+        {
+          'id': 'c1',
+          'title': '第一篇',
+          'topic_number': 1,
+          'content': '关于从前的一段正文。',
+          'has_audio': true,
+        },
+        {'id': 'blank', 'title': '空标题', 'topic_number': 2, 'content': '  '},
+        {'id': 'c3', 'title': '第三篇', 'topic_number': 3, 'content': '这是另一段正文。'},
+      ]);
       await tester.pumpAndSettle();
-      final delayed = Completer<void>();
-      client.editorGate = delayed;
-      await tester.tap(find.byType(BookCover));
+      expect(find.byType(BookPage), findsOneWidget);
+      final scroll = find.byType(SingleChildScrollView);
+      await tester.scrollUntilVisible(
+        find.text('目录'),
+        140,
+        scrollable: find
+            .descendant(of: scroll, matching: find.byType(Scrollable))
+            .first,
+      );
+      expect(find.text('空标题'), findsNothing);
+      await tester.ensureVisible(find.widgetWithText(ListTile, '第三篇'));
+      await tester.tap(find.widgetWithText(ListTile, '第三篇'));
       await tester.pumpAndSettle();
-      await tester.enterText(find.byType(TextFormField), '刚刚写下的新内容。');
-      client
-        ..editorRevision = 1
-        ..editorText = '另一台设备写下的内容。';
-      delayed.complete();
+      expect(find.textContaining('这是另一段正文。').hitTestable(), findsOneWidget);
+      expect(find.text('导出 PDF'), findsOneWidget);
+      await tester.ensureVisible(find.text('扫码聆听原声'));
+      expect(find.text('扫码聆听原声').hitTestable(), findsOneWidget);
+      const printChannel = MethodChannel('life_pages/print');
+      final messenger =
+          TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+      Map<Object?, Object?>? exported;
+      messenger.setMockMethodCallHandler(printChannel, (call) async {
+        expect(call.method, 'printBook');
+        exported = call.arguments as Map;
+        return null;
+      });
+      addTearDown(() => messenger.setMockMethodCallHandler(printChannel, null));
+      await tester.tap(find.text('导出 PDF'));
+      await tester.pumpAndSettle();
+      final exportedChapters = exported!['chapters'] as List;
+      expect(exported!['title'], '另一本');
+      expect(exportedChapters.map((chapter) => chapter['title']), [
+        '第一篇',
+        '第三篇',
+      ]);
+      expect(exportedChapters.first['url'], 'https://test/listen/one');
+      await tester.pageBack();
+      await tester.pumpAndSettle();
+
+      await tester.tap(
+        find.descendant(
+          of: find.byType(Card).last,
+          matching: find.byTooltip('书籍选项'),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('修改书名和作者'));
+      await tester.pumpAndSettle();
+      expect(find.widgetWithText(TextFormField, '讲述人'), findsOneWidget);
+      await tester.enterText(find.byType(TextFormField).first, '新书名');
+      client.rejectRename = true;
+      await tester.tap(find.text('保存'));
+      await tester.pumpAndSettle();
+      expect(find.text('保存失败，请重试'), findsOneWidget);
+      expect(find.widgetWithText(TextFormField, '新书名'), findsOneWidget);
+      client.rejectRename = false;
+      await tester.tap(find.text('保存'));
+      await tester.pumpAndSettle();
+      expect(find.widgetWithText(TextFormField, '新书名'), findsNothing);
+      expect(client.books.last['title'], '新书名');
+      expect(client.active, 'first');
+
+      client.previewResponse = null;
+      await tester.tap(
+        find.descendant(
+          of: find.byType(Card).last,
+          matching: find.byType(BookCover),
+        ),
+      );
       await settleShelf(tester);
-      expect(find.text('刚刚写下的新内容。'), findsOneWidget);
-      await tester.pumpWidget(const SizedBox.shrink());
+      expect(find.byType(ChapterEditor), findsOneWidget);
+      expect(find.widgetWithText(AppBar, '新书名'), findsOneWidget);
     },
+    variant: TargetPlatformVariant.only(TargetPlatform.iOS),
   );
-
-  testWidgets('shelf opens editor directly, with preview in the book menu', (
-    tester,
-  ) async {
-    FlutterSecureStorage.setMockInitialValues({
-      'share_c1': 'https://test/listen/one',
-    });
-    final dir = Directory.systemTemp.createTempSync('lifepages-preview-');
-    addTearDown(() => dir.deleteSync(recursive: true));
-    final client = ShelfApi()
-      ..previewResponse = Completer<List<Map<String, dynamic>>>();
-    client.books.add({
-      ...client.books.first,
-      'id': 'other',
-      'title': '另一本',
-      'author': '讲述人',
-    });
-    await tester.pumpWidget(
-      MaterialApp(
-        home: ChatShell(client: client, documentsDirectory: () async => dir),
-      ),
-    );
-    await settleShelf(tester);
-    final nav = find.byType(OneSayChatNavigation);
-    await tester.tap(find.descendant(of: nav, matching: find.text('书架')).first);
-    await tester.pumpAndSettle();
-    final otherCard = find.byType(Card).last;
-    await tester.tap(
-      find.descendant(of: otherCard, matching: find.byType(BookCover)),
-    );
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 400));
-    await settleShelf(tester);
-    expect(find.widgetWithText(AppBar, '另一本'), findsOneWidget);
-    expect(find.byType(ChapterEditor), findsOneWidget);
-    final header = tester.widget<AppBar>(find.byType(AppBar));
-    expect(header.backgroundColor, paper);
-    expect(header.scrolledUnderElevation, 0);
-    expect(find.byType(BookPage), findsNothing);
-    expect(find.text('第 1 章 · 故乡的轮廓'), findsOneWidget);
-    expect(client.active, 'first');
-    await tester.pageBack();
-    await tester.pumpAndSettle();
-    await tester.tap(
-      find.descendant(
-        of: find.byType(Card).last,
-        matching: find.byTooltip('书籍选项'),
-      ),
-    );
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('预览全书'));
-
-    client.previewResponse!.complete([
-      {
-        'id': 'c1',
-        'title': '第一篇',
-        'topic_number': 1,
-        'content': '关于从前的一段正文。',
-        'has_audio': true,
-      },
-      {'id': 'blank', 'title': '空标题', 'topic_number': 2, 'content': '  '},
-      {'id': 'c3', 'title': '第三篇', 'topic_number': 3, 'content': '这是另一段正文。'},
-    ]);
-    await tester.pumpAndSettle();
-    expect(find.byType(BookPage), findsOneWidget);
-    final scroll = find.byType(SingleChildScrollView);
-    await tester.scrollUntilVisible(
-      find.text('目录'),
-      140,
-      scrollable: find
-          .descendant(of: scroll, matching: find.byType(Scrollable))
-          .first,
-    );
-    expect(find.text('空标题'), findsNothing);
-    await tester.ensureVisible(find.widgetWithText(ListTile, '第三篇'));
-    await tester.tap(find.widgetWithText(ListTile, '第三篇'));
-    await tester.pumpAndSettle();
-    expect(find.textContaining('这是另一段正文。').hitTestable(), findsOneWidget);
-    expect(find.text('导出 PDF'), findsOneWidget);
-    await tester.ensureVisible(find.text('扫码聆听原声'));
-    expect(find.text('扫码聆听原声').hitTestable(), findsOneWidget);
-    const printChannel = MethodChannel('life_pages/print');
-    final messenger =
-        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
-    Map<Object?, Object?>? exported;
-    messenger.setMockMethodCallHandler(printChannel, (call) async {
-      expect(call.method, 'printBook');
-      exported = call.arguments as Map;
-      return null;
-    });
-    addTearDown(() => messenger.setMockMethodCallHandler(printChannel, null));
-    await tester.tap(find.text('导出 PDF'));
-    await tester.pumpAndSettle();
-    final exportedChapters = exported!['chapters'] as List;
-    expect(exported!['title'], '另一本');
-    expect(exportedChapters.map((chapter) => chapter['title']), ['第一篇', '第三篇']);
-    expect(exportedChapters.first['url'], 'https://test/listen/one');
-    await tester.pageBack();
-    await tester.pumpAndSettle();
-
-    await tester.tap(
-      find.descendant(
-        of: find.byType(Card).last,
-        matching: find.byTooltip('书籍选项'),
-      ),
-    );
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('修改书名和作者'));
-    await tester.pumpAndSettle();
-    expect(find.widgetWithText(TextFormField, '讲述人'), findsOneWidget);
-    await tester.enterText(find.byType(TextFormField).first, '新书名');
-    client.rejectRename = true;
-    await tester.tap(find.text('保存'));
-    await tester.pumpAndSettle();
-    expect(find.text('保存失败，请重试'), findsOneWidget);
-    expect(find.widgetWithText(TextFormField, '新书名'), findsOneWidget);
-    client.rejectRename = false;
-    await tester.tap(find.text('保存'));
-    await tester.pumpAndSettle();
-    expect(find.widgetWithText(TextFormField, '新书名'), findsNothing);
-    expect(client.books.last['title'], '新书名');
-    expect(client.active, 'first');
-
-    client.previewResponse = null;
-    await tester.tap(
-      find.descendant(
-        of: find.byType(Card).last,
-        matching: find.byType(BookCover),
-      ),
-    );
-    await settleShelf(tester);
-    expect(find.byType(ChapterEditor), findsOneWidget);
-    expect(find.widgetWithText(AppBar, '新书名'), findsOneWidget);
-  });
 }

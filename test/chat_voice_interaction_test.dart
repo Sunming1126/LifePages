@@ -13,6 +13,8 @@ import 'package:life_pages/main.dart';
 import 'package:life_pages/onesay_voice_widgets.dart';
 import 'package:life_pages/rtc_reply_player.dart';
 import 'package:life_pages/voice_io.dart';
+import 'package:life_pages/voice_preferences.dart';
+import 'package:life_pages/reading_preferences.dart';
 import 'package:record/record.dart';
 
 class Capture extends VoiceCapture {
@@ -37,11 +39,13 @@ class Capture extends VoiceCapture {
 }
 
 class Wire extends VoiceWire {
-  Wire({this.recognizes = true});
+  Wire({this.recognizes = true, this.finishes = true});
 
   final bool recognizes;
+  final bool finishes;
   final incoming = StreamController<dynamic>.broadcast();
   int chunks = 0;
+  bool finishRequested = false;
   void event(String event, [Map<String, dynamic>? sentence]) => incoming.add(
     jsonEncode({
       'header': {'event': event},
@@ -58,7 +62,10 @@ class Wire extends VoiceWire {
     if (data is String) {
       final action = jsonDecode(data)['header']['action'];
       if (action == 'run-task') event('task-started');
-      if (action == 'finish-task') event('task-finished');
+      if (action == 'finish-task') {
+        finishRequested = true;
+        if (finishes) event('task-finished');
+      }
     } else if (recognizes) {
       chunks++;
       event('result-generated', {
@@ -77,6 +84,11 @@ class Wire extends VoiceWire {
 
 class ChatApi extends Api {
   final turns = <Map<String, dynamic>>[];
+  final turnPaths = <String>[];
+  final queuedOriginals = <String>[];
+  bool supportsDeferredAudio = false;
+  Completer<String>? nativeQueue;
+  String? fallbackAudio;
   List<dynamic> history = [];
   final topics = [
     {
@@ -103,6 +115,24 @@ class ChatApi extends Api {
   final refreshRequests = <String>[];
   int topicRequests = 0, historyRequests = 0;
   @override
+  Future<String> enqueueVoiceUpload({
+    required String book,
+    required String message,
+    required String request,
+    required String path,
+  }) async {
+    queuedOriginals.add(path);
+    expect(message, 'user-1');
+    expect(request, turns.single['request_id']);
+    return nativeQueue!.future;
+  }
+
+  @override
+  Future<Map<String, PendingVoiceUpload>> pendingVoiceUploads(
+    String book,
+  ) async => {};
+
+  @override
   Stream<Map<String, dynamic>> streamTurn(
     String path,
     Map<String, dynamic> body, {
@@ -123,6 +153,10 @@ class ChatApi extends Api {
     String path, [
     Map<String, dynamic>? body,
   ]) async {
+    if (path == '/api/transcribe') {
+      fallbackAudio = body!['audio_base64'] as String;
+      return {'text': '我小时候住在海边。'};
+    }
     if (path.endsWith('/voice/token')) {
       return {
         'token': 'st-test',
@@ -141,7 +175,11 @@ class ChatApi extends Api {
     if (uri.path.endsWith('/topics')) {
       topicRequests++;
       await topicBlock?.future;
-      return {'active_id': activeSession, 'topics': topics};
+      return {
+        'active_id': activeSession,
+        'topics': topics,
+        if (supportsDeferredAudio) 'deferred_voice_upload': true,
+      };
     }
     if (method == 'PUT' && uri.path.endsWith('/active')) {
       await activationBlock?.future;
@@ -164,7 +202,8 @@ class ChatApi extends Api {
         'chapters': [],
       };
     }
-    if (path.endsWith('/turns')) {
+    if (path.endsWith('/turns') || path.endsWith('/voice-turns')) {
+      turnPaths.add(path);
       turns.add(Map<String, dynamic>.from(body!));
       await responseBlock?.future;
       final id = body['session_id'] as String? ?? 'p';
@@ -180,7 +219,13 @@ class ChatApi extends Api {
         },
         {'id': 'ai-${turns.length}', 'role': 'assistant', 'text': '我在听。'},
       ]);
-      return {'text': '我在听。'};
+      return {
+        'text': '我在听。',
+        if (path.endsWith('/voice-turns')) ...{
+          'user_id': 'user-${turns.length}',
+          'assistant_id': 'ai-${turns.length}',
+        },
+      };
     }
     throw StateError('Unexpected API request $path');
   }
@@ -188,6 +233,23 @@ class ChatApi extends Api {
 
 class ReplyPlayerProbe extends RtcReplyPlayer {
   int stops = 0;
+  int warms = 0;
+  final releases = <Duration>[];
+
+  @override
+  Future<void> preconnect(
+    String bookId,
+    RtcRequest request, {
+    required String voiceId,
+  }) async {
+    warms++;
+  }
+
+  @override
+  void releaseWarm({Duration grace = Duration.zero}) {
+    releases.add(grace);
+  }
+
   final segments = <List<int>>[];
 
   @override
@@ -245,6 +307,7 @@ void main() {
     int tab = 0,
     RtcReplyPlayer? player,
     bool recognizes = true,
+    bool finishes = true,
   }) => MaterialApp(
     theme: ThemeData(
       useMaterial3: true,
@@ -275,7 +338,10 @@ void main() {
                     client: api,
                     documentsDirectory: () async => dir,
                     voiceConnector: (url, headers) async {
-                      final w = Wire(recognizes: recognizes);
+                      final w = Wire(
+                        recognizes: recognizes,
+                        finishes: finishes,
+                      );
                       wires.add(w);
                       return w;
                     },
@@ -340,6 +406,39 @@ void main() {
     await flush(tester);
     return gesture;
   }
+
+  testWidgets(
+    'iOS and Android preconnect and release RTC on consent revocation',
+    (tester) async {
+      automaticReplyAudio.value = true;
+      FlutterSecureStorage.setMockInitialValues({
+        'ai_consent_v2_p': 'yes',
+        'rtc_reply_consent_v2_p': 'yes',
+      });
+      final player = ReplyPlayerProbe();
+      await tester.pumpWidget(harness(player: player));
+      await flush(tester);
+      expect(player.warms, greaterThan(0));
+      final prepared = player.warms;
+      replyVoiceRevision.value++;
+      await flush(tester);
+      expect(player.warms, greaterThan(prepared));
+      await const FlutterSecureStorage().delete(key: 'rtc_reply_consent_v2_p');
+      replyAudioConsentRevision.value++;
+      await flush(tester);
+      expect(player.releases, contains(Duration.zero));
+      final revoked = player.warms;
+      replyVoiceRevision.value++;
+      await flush(tester);
+      expect(player.warms, revoked);
+      await tester.pumpWidget(const SizedBox());
+      await flush(tester);
+    },
+    variant: TargetPlatformVariant({
+      TargetPlatform.iOS,
+      TargetPlatform.android,
+    }),
+  );
 
   testWidgets(
     'assistant text comes first and can be selected, copied and refreshed',
@@ -433,6 +532,11 @@ void main() {
 
         await record();
         expect(capture.starts, 1);
+        // Windows may complete the WAV write after the fixed frame flushes.
+        // Wait for the observable request, while keeping the exact count below.
+        for (var i = 0; i < 20 && api.turns.isEmpty; i++) {
+          await flush(tester);
+        }
         expect(api.turns, hasLength(1));
         expect(player.segments, [
           [0],
@@ -488,6 +592,77 @@ void main() {
       },
     );
   }
+
+  testWidgets(
+    'Android recovers a stalled realtime transcript with the saved WAV',
+    (tester) async {
+      await tester.pumpWidget(harness(finishes: false));
+      await flush(tester);
+      final gesture = await hold(tester);
+      capture.audio.add(List<int>.filled(3200, 1));
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 650)),
+      );
+      await gesture.up();
+      for (var i = 0; i < 5 && !wires.single.finishRequested; i++) {
+        await flush(tester);
+      }
+      expect(wires.single.finishRequested, isTrue);
+      expect(api.turns, isEmpty);
+      await tester.pump(const Duration(milliseconds: 3100));
+      for (var i = 0; i < 5 && api.turns.isEmpty; i++) {
+        await flush(tester);
+      }
+      final turn = api.turns.single;
+      expect(turn['text'], '我小时候住在海边。');
+      expect(turn['audio_base64'], api.fallbackAudio);
+      expect(
+        utf8.decode(base64Decode(api.fallbackAudio!).take(4).toList()),
+        'RIFF',
+      );
+    },
+    variant: TargetPlatformVariant.only(TargetPlatform.android),
+  );
+
+  testWidgets(
+    'Android displays the streamed reply before native audio upload',
+    (tester) async {
+      api.supportsDeferredAudio = true;
+      api.firstChunk = Completer<String>();
+      api.responseBlock = Completer<void>();
+      api.nativeQueue = Completer<String>();
+      await tester.pumpWidget(harness());
+      await flush(tester);
+      final gesture = await hold(tester);
+      capture.audio.add(List<int>.filled(3200, 1));
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 650)),
+      );
+      await gesture.up();
+      await flush(tester);
+      api.firstChunk!.complete('先收到文字');
+      for (var i = 0; i < 5 && api.turns.isEmpty; i++) {
+        await flush(tester);
+      }
+      expect(api.turnPaths.single, '/api/people/p/voice-turns');
+      expect(api.turns.single['payload_hash'], matches(r'^[0-9a-f]{64}$'));
+      expect(api.turns.single.containsKey('audio_base64'), isFalse);
+      expect(find.text('先收到文字'), findsOneWidget);
+      expect(api.queuedOriginals, isEmpty);
+
+      api.responseBlock!.complete();
+      for (var i = 0; i < 5 && api.queuedOriginals.isEmpty; i++) {
+        await flush(tester);
+      }
+      expect(find.text('我在听。'), findsOneWidget);
+      expect(File(api.queuedOriginals.single).existsSync(), isTrue);
+      api.nativeQueue!.complete('${dir.path}/native.wav');
+      await flush(tester);
+      expect(File(api.queuedOriginals.single).existsSync(), isFalse);
+      await tester.pumpWidget(const SizedBox.shrink());
+    },
+    variant: TargetPlatformVariant.only(TargetPlatform.android),
+  );
 
   testWidgets('unrecognized voice is kept on disk and is not submitted', (
     tester,
@@ -740,125 +915,37 @@ void main() {
     expect(capture.starts, 0);
   });
 
-  testWidgets('chapter directory switches history and routes new messages', (
-    tester,
-  ) async {
-    api.history = [
-      {'id': 'old', 'role': 'user', 'text': '只属于第一章'},
-    ];
-    for (var number = 3; number <= 26; number++) {
-      api.topics.add({
-        'id': 'p$number',
-        'number': number,
-        'title': '测试章节 $number',
-        'theme': '故土与根脉',
-        'character_count': 0,
-      });
-    }
-    await tester.pumpWidget(
-      RepaintBoundary(key: const ValueKey('modal-screen'), child: harness()),
-    );
-    await flush(tester);
-    expect(find.text('只属于第一章'), findsOneWidget);
-    await tester.tap(find.byKey(const ValueKey('assistant-keyboard-mode')));
-    await tester.pump();
-    await tester.enterText(find.byType(TextField), '留在第一章的草稿');
-
-    Future<void> openSessionSheet() async {
-      await tester.tap(find.byKey(const ValueKey('assistant-history-button')));
-      await tester.pumpAndSettle();
-      expect(find.text('章节目录'), findsOneWidget);
-      final sheet = tester.getRect(
-        find.byKey(const ValueKey('chat-bottom-sheet')),
+  testWidgets(
+    'legacy chat hides chapter navigation and keeps its conversation',
+    (tester) async {
+      api.history = [
+        {'id': 'old', 'role': 'user', 'text': '旧书已经讲过的故事'},
+      ];
+      await tester.pumpWidget(harness());
+      await flush(tester);
+      expect(find.text('旧书已经讲过的故事'), findsOneWidget);
+      expect(find.text('第 1 章 · 故乡的轮廓'), findsNothing);
+      expect(
+        find.byKey(const ValueKey('assistant-history-button')),
+        findsNothing,
       );
-      final nav = tester.getRect(find.byType(OneSayChatNavigation));
-      expect(sheet.left, lessThanOrEqualTo(nav.left));
-      expect(sheet.right, greaterThanOrEqualTo(nav.right));
-      expect(sheet.top, lessThan(nav.top));
-      expect(sheet.bottom, greaterThan(nav.bottom));
-    }
-
-    final delayed = Completer<void>();
-    api.topicBlock = delayed;
-    await openSessionSheet();
-    expect(find.text('家族的记忆'), findsOneWidget);
-    final scrollbar = find.byKey(const ValueKey('chapter-directory-scrollbar'));
-    final widget = tester.widget<RawScrollbar>(scrollbar);
-    expect(widget.thumbVisibility, isTrue);
-    expect(widget.scrollbarOrientation, ScrollbarOrientation.right);
-    final controller = widget.controller!;
-    expect(controller.position.maxScrollExtent, greaterThan(0));
-    final listBounds = tester.getRect(scrollbar);
-    await tester.dragFrom(
-      Offset(listBounds.right - 4, listBounds.top + 24),
-      const Offset(0, 120),
-    );
-    await tester.pumpAndSettle();
-    expect(controller.offset, greaterThan(0));
-    controller.jumpTo(0);
-    await tester.pumpAndSettle();
-    final inFlight = api.topicRequests;
-    await tester.tap(find.byTooltip('关闭'));
-    await tester.pumpAndSettle();
-    await openSessionSheet();
-    expect(api.topicRequests, inFlight);
-    delayed.completeError(Exception('离线'));
-    api.topicBlock = null;
-    await tester.pumpAndSettle();
-    expect(find.text('家族的记忆'), findsOneWidget);
-    await captureLayout(
-      tester,
-      'chat-topic-sheet-headless',
-      boundaryKey: 'modal-screen',
-    );
-    final beforeSwitch = api.historyRequests;
-    api.supportsCombinedActivation = true;
-    api.sessionMessages['p2'] = [
-      {'id': 'opener', 'role': 'assistant', 'text': '说说家里的长辈吧。'},
-    ];
-    final firstActivation = api.activationBlock = Completer<void>();
-    await tester.tap(find.text('家族的记忆'));
-    await tester.pumpAndSettle();
-    expect(find.text('第 2 章 · 家族的记忆'), findsOneWidget);
-    expect(find.text('正在加载本章聊天…'), findsOneWidget);
-    expect(find.text('只属于第一章'), findsNothing);
-    firstActivation.complete();
-    api.activationBlock = null;
-    await tester.pumpAndSettle();
-    expect(find.text('说说家里的长辈吧。'), findsOneWidget);
-    expect(api.historyRequests, beforeSwitch);
-    final newId = api.activeSession;
-    expect(newId, isNot('p'));
-    expect(find.text('只属于第一章'), findsNothing);
-
-    expect(find.text('留在第一章的草稿'), findsNothing);
-    await tester.enterText(find.byType(TextField), '只属于第二章');
-    await tester.pump();
-    await tester.tap(find.byKey(const ValueKey('assistant-send-button')));
-    await flush(tester);
-    expect(api.turns.single['session_id'], newId);
-
-    await openSessionSheet();
-    final returnActivation = api.activationBlock = Completer<void>();
-    await tester.tap(find.text('故乡的轮廓'));
-    await tester.pumpAndSettle();
-    expect(api.activeSession, newId);
-    expect(find.text('第 1 章 · 故乡的轮廓'), findsOneWidget);
-    expect(find.text('只属于第一章'), findsOneWidget);
-    expect(find.text('留在第一章的草稿'), findsOneWidget);
-    expect(find.text('只属于第二章'), findsNothing);
-    returnActivation.completeError(Exception('离线'));
-    api.activationBlock = null;
-    await tester.pumpAndSettle();
-    expect(find.text('只属于第一章'), findsOneWidget);
-    api.supportsCombinedActivation = false;
-    final beforeRetry = api.historyRequests;
-    await tester.tap(find.text('本章未同步，点此重试'));
-    await tester.pumpAndSettle();
-    expect(api.activeSession, 'p');
-    expect(api.historyRequests, beforeRetry + 1);
-    expect(find.text('只属于第一章'), findsOneWidget);
-  });
+      await tester.tap(find.byKey(const ValueKey('assistant-keyboard-mode')));
+      await tester.pump();
+      await tester.enterText(find.byType(TextField), '继续讲原来的故事');
+      await tester.tap(find.byKey(const ValueKey('assistant-settings-button')));
+      await tester.pumpAndSettle();
+      expect(find.text('章节目录'), findsNothing);
+      expect(find.text('家族的记忆'), findsNothing);
+      expect(find.text('本章未完成的输入'), findsOneWidget);
+      await tester.tapAt(const Offset(10, 10));
+      await tester.pumpAndSettle();
+      expect(find.text('继续讲原来的故事'), findsOneWidget);
+      await tester.tap(find.byKey(const ValueKey('assistant-send-button')));
+      await flush(tester);
+      expect(api.turns.single['session_id'], 'p');
+      expect(find.text('旧书已经讲过的故事'), findsOneWidget);
+    },
+  );
 
   testWidgets('cancelled pointer ends the in-composer recording', (
     tester,

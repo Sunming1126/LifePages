@@ -125,7 +125,7 @@ void main() {
     expect(await ReplyVoice.load(), ReplyVoice.yunzhou);
     expect(find.text('云舟 · 男声'), findsOneWidget);
     await tester.pumpWidget(const SizedBox.shrink());
-  });
+  }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
 
   testWidgets(
     'settings returns to the app after email login switches the account',
@@ -180,8 +180,7 @@ void main() {
         '/api/auth/email-code/send',
         '/api/auth/email-code/login',
       ]);
-    },
-  );
+    }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
 
   testWidgets('guest profile opens the login sheet and submits a password', (
     tester,
@@ -213,7 +212,7 @@ void main() {
     await tester.pumpAndSettle();
     expect(session?['token'], 'test-session');
     expect(api.requests, ['/api/auth/email-password/login']);
-  });
+  }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
 
   testWidgets('personal center opens offline and saves the shared background', (
     tester,
@@ -336,10 +335,9 @@ void main() {
     await tester.tap(find.text('我的订单'));
     await tester.pumpAndSettle();
     expect(find.text('订单功能尚未开放。'), findsOneWidget);
-
     await tester.pumpWidget(const SizedBox.shrink());
     FlutterSecureStorage.setMockInitialValues({'page_background': 'mist'});
     await openApp();
     expect(pageImage(), PageBackground.paperTone.image);
-  });
+  }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
 }

@@ -24,6 +24,28 @@ def wav():
 
 
 class FlowTest(unittest.IsolatedAsyncioTestCase):
+    async def test_streaming_model_reuses_client_until_api_shutdown(self):
+        prompts = []
+
+        def reply(request):
+            prompts.append(json.loads(request.content)['messages'][-1]['content'])
+            return httpx.Response(200, text=(
+                'data: {"choices":[{"delta":{"content":"收到"},"finish_reason":"stop"}]}\n'
+                'data: [DONE]\n'
+            ))
+
+        provider = httpx.AsyncClient(transport=httpx.MockTransport(reply))
+        config = ('test-key', 'https://model.example.test/v1', 'test-model')
+        with patch.object(backend, 'read_llm_config', return_value=config), \
+                patch.object(backend.httpx, 'AsyncClient', return_value=provider) as client_factory:
+            async with backend.lifespan(backend.app):
+                for prompt in ('虚构测试一', '虚构测试二'):
+                    self.assertEqual([text async for text in backend.stream_llm('测试', prompt)], ['收到'])
+                    self.assertFalse(provider.is_closed)
+            client_factory.assert_called_once()
+        self.assertTrue(provider.is_closed)
+        self.assertEqual(prompts, ['虚构测试一', '虚构测试二'])
+
     async def test_bailian_chapter_json_requests_disable_thinking(self):
         def reply(request):
             body = json.loads(request.content)
@@ -70,6 +92,47 @@ class FlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(events[-1]['text'], '小时候在院子里看星星，那画面很美。')
         retry = await self.client.post(path, json=turn)
         self.assertEqual([json.loads(line) for line in retry.text.splitlines()], [events[-1]])
+
+    async def test_deferred_voice_replies_before_audio_and_retries_idempotently(self):
+        pid = (await self.client.get('/api/current-person')).json()['id']
+        raw = base64.b64decode(wav())
+        turn = {'request_id': 'f' * 32, 'text': '虚构：小时候住在河边。', 'speak': True}
+        turn['payload_hash'] = backend.turn_digest(turn['text'], raw)
+        path = f'/api/people/{pid}/voice-turns'
+        upload = f"{path}/{turn['request_id']}/audio"
+        model_calls = 0
+
+        async def deltas(*_):
+            nonlocal model_calls
+            model_calls += 1
+            with backend.closing(backend.db()) as c:
+                self.assertIsNone(c.execute('SELECT audio FROM messages WHERE role=\'user\'').fetchone()[0])
+            yield '我在听，'
+            yield '河边有什么您印象最深的地方？'
+
+        with patch.object(backend, 'stream_llm', deltas):
+            reply = await self.client.post(f'{path}/stream', json=turn)
+            events = [json.loads(line) for line in reply.text.splitlines()]
+            self.assertEqual(events[0]['type'], 'delta')
+            saved = events[-1]
+            self.assertEqual(saved['type'], 'done')
+            retry = await self.client.post(f'{path}/stream', json=turn)
+            self.assertEqual(json.loads(retry.text), saved)
+        self.assertEqual(model_calls, 1)
+        playback = f"/api/messages/{saved['user_id']}/audio"
+        self.assertEqual((await self.client.get(playback)).status_code, 404)
+        other_token = (await self.client.post('/api/bootstrap', headers={'Authorization': ''})).json()['token']
+        self.assertEqual((await self.client.put(upload, content=raw,
+                         headers={'Authorization': f'Bearer {other_token}'})).status_code, 404)
+        self.assertEqual((await self.client.put(upload, content=b'broken')).status_code, 400)
+        self.assertEqual((await self.client.put(upload, content=raw[:-1] + b'\x01')).status_code, 409)
+        for _ in range(2):
+            self.assertEqual((await self.client.put(upload, content=raw)).status_code, 204)
+        self.assertEqual((await self.client.get(playback)).content, raw)
+        history = (await self.client.get(f'/api/people/{pid}')).json()['messages']
+        self.assertEqual([m['id'] for m in history if m['id'] in (saved['user_id'], saved['assistant_id'])],
+                         [saved['user_id'], saved['assistant_id']])
+        self.assertEqual(next(m['has_audio'] for m in history if m['id'] == saved['user_id']), 1)
 
     async def test_story_shares_and_revoke(self):
         r = await self.client.post('/api/people', json={'name': '奶奶', 'background': '故乡'})

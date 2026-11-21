@@ -14,9 +14,20 @@ enum _BookAction { rename, preview, delete }
 
 const _bookAccent = Color(0xff836332);
 
-Future<BookRecord?> newBookSheet(BuildContext context, Api client) async {
+Future<BookRecord?> newBookSheet(
+  BuildContext context,
+  Api client, {
+  bool interview = false,
+  int interviewVersion = 1,
+}) async {
   final form = GlobalKey<FormState>();
-  final data = <String, dynamic>{'template_id': 'life'};
+  final data = <String, dynamic>{
+    if (interview) ...{
+      'interview': true,
+      if (interviewVersion == 2) 'interview_version': 2,
+    } else
+      'template_id': 'life',
+  };
   List? templates;
   var templateName = '完整人生（26 章）';
   return showChatSheet<BookRecord>(
@@ -41,64 +52,65 @@ Future<BookRecord?> newBookSheet(BuildContext context, Api client) async {
                       ? '请填写${field.value}'
                       : null,
                 ),
-              ListTile(
-                contentPadding: EdgeInsets.zero,
-                leading: const Icon(Icons.view_list_outlined),
-                title: const Text('章节模板'),
-                subtitle: Text(templateName),
-                trailing: const Icon(Icons.chevron_right_rounded),
-                onTap: () async {
-                  try {
-                    templates ??=
-                        await client.call('GET', '/api/books/templates')
-                            as List;
-                    if (!sheet.mounted) return;
-                    final chosen = await showChatSheet<Map>(
-                      context: sheet,
-                      builder: (menu) => ListView(
-                        shrinkWrap: true,
-                        children: [
-                          const ListTile(title: Text('选择章节模板')),
-                          for (final template in templates!)
-                            ExpansionTile(
-                              title: Text(
-                                '${template['name']}（${(template['chapters'] as List).length} 章）',
-                              ),
-                              leading: template['id'] == data['template_id']
-                                  ? const Icon(Icons.check_rounded)
-                                  : const Icon(Icons.auto_stories_outlined),
-                              children: [
-                                for (final (index, title)
-                                    in (template['chapters'] as List).indexed)
-                                  ListTile(
-                                    dense: true,
-                                    title: Text('第 ${index + 1} 章 · $title'),
-                                  ),
-                                TextButton(
-                                  onPressed: () =>
-                                      Navigator.pop(menu, template),
-                                  child: const Text('使用这套模板'),
+              if (!interview)
+                ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  leading: const Icon(Icons.view_list_outlined),
+                  title: const Text('章节模板'),
+                  subtitle: Text(templateName),
+                  trailing: const Icon(Icons.chevron_right_rounded),
+                  onTap: () async {
+                    try {
+                      templates ??=
+                          await client.call('GET', '/api/books/templates')
+                              as List;
+                      if (!sheet.mounted) return;
+                      final chosen = await showChatSheet<Map>(
+                        context: sheet,
+                        builder: (menu) => ListView(
+                          shrinkWrap: true,
+                          children: [
+                            const ListTile(title: Text('选择章节模板')),
+                            for (final template in templates!)
+                              ExpansionTile(
+                                title: Text(
+                                  '${template['name']}（${(template['chapters'] as List).length} 章）',
                                 ),
-                              ],
-                            ),
-                        ],
-                      ),
-                    );
-                    if (!sheet.mounted || chosen == null) return;
-                    update(() {
-                      data['template_id'] = chosen['id'];
-                      templateName =
-                          '${chosen['name']}（${(chosen['chapters'] as List).length} 章）';
-                    });
-                  } catch (error) {
-                    if (sheet.mounted) {
-                      ScaffoldMessenger.of(
-                        sheet,
-                      ).showSnackBar(SnackBar(content: Text(errorText(error))));
+                                leading: template['id'] == data['template_id']
+                                    ? const Icon(Icons.check_rounded)
+                                    : const Icon(Icons.auto_stories_outlined),
+                                children: [
+                                  for (final (index, title)
+                                      in (template['chapters'] as List).indexed)
+                                    ListTile(
+                                      dense: true,
+                                      title: Text('第 ${index + 1} 章 · $title'),
+                                    ),
+                                  TextButton(
+                                    onPressed: () =>
+                                        Navigator.pop(menu, template),
+                                    child: const Text('使用这套模板'),
+                                  ),
+                                ],
+                              ),
+                          ],
+                        ),
+                      );
+                      if (!sheet.mounted || chosen == null) return;
+                      update(() {
+                        data['template_id'] = chosen['id'];
+                        templateName =
+                            '${chosen['name']}（${(chosen['chapters'] as List).length} 章）';
+                      });
+                    } catch (error) {
+                      if (sheet.mounted) {
+                        ScaffoldMessenger.of(sheet).showSnackBar(
+                          SnackBar(content: Text(errorText(error))),
+                        );
+                      }
                     }
-                  }
-                },
-              ),
+                  },
+                ),
             ],
           ),
         ),
@@ -160,6 +172,7 @@ class Bookshelf extends StatefulWidget {
     required this.onChaptersChanged,
     required this.onDelete,
     this.documentsDirectory,
+    this.onContinue,
   });
 
   final List<BookRecord> books;
@@ -171,6 +184,7 @@ class Bookshelf extends StatefulWidget {
   final ValueChanged<String> onChaptersChanged;
   final Future<void> Function(String, BookRecord) onRename;
   final ValueChanged<String> onDelete;
+  final ValueChanged<String>? onContinue;
   final Future<Directory> Function()? documentsDirectory;
 
   @override
@@ -243,6 +257,11 @@ class _BookshelfState extends State<Bookshelf> {
               widget.client,
               id,
               documentsDirectory: widget.documentsDirectory,
+              interview:
+                  widget.books.firstWhere(
+                    (book) => book['id'] == id,
+                  )['interview_version'] !=
+                  null,
             )
             .then((opening) {
               if (mounted &&
@@ -261,14 +280,18 @@ class _BookshelfState extends State<Bookshelf> {
 
   Future<void> _openEditor(BuildContext context, BookRecord book) async {
     final id = book['id'] as String;
+    final interview = book['interview_version'] != null;
     await Navigator.of(context).push(
-      MaterialPageRoute<void>(
-        builder: (_) => ChapterEditor(
+      PageRouteBuilder<void>(
+        transitionDuration: Duration.zero,
+        reverseTransitionDuration: Duration.zero,
+        pageBuilder: (_, _, _) => ChapterEditor(
           bookId: id,
           name: book['name'] as String,
           title: book['title'] as String,
           author: book['author'] as String,
           client: widget.client,
+          interview: interview,
           documentsDirectory: widget.documentsDirectory,
           initialOpening: _openings[id],
           loadOpening: () => _requestOpening(id),
@@ -292,6 +315,7 @@ class _BookshelfState extends State<Bookshelf> {
           title: book['title'] as String,
           author: book['author'] as String,
           client: widget.client,
+          interview: book['interview_version'] != null,
           onChaptersChanged: () => widget.onChaptersChanged(id),
         ),
       ),
@@ -412,6 +436,7 @@ class _BookshelfState extends State<Bookshelf> {
     final completed = book['completed_topic_count'] as int?;
     final characters = book['character_count'] as int?;
     final current = book['id'] == widget.activeId;
+    final interview = book['interview_version'] != null;
     return Card(
       color: const Color(0xfffffdfa),
       elevation: 0,
@@ -478,24 +503,32 @@ class _BookshelfState extends State<Bookshelf> {
                         overflow: TextOverflow.ellipsis,
                       ),
                       const SizedBox(height: 12),
-                      ClipRRect(
-                        borderRadius: BorderRadius.circular(8),
-                        child: LinearProgressIndicator(
-                          value: total > 0
-                              ? ((completed ?? 0) / total).clamp(0.0, 1.0)
-                              : 0,
-                          minHeight: 5,
-                          color: _bookAccent,
-                          backgroundColor: const Color(0xffeee7d9),
+                      if (!interview)
+                        ClipRRect(
+                          borderRadius: BorderRadius.circular(8),
+                          child: LinearProgressIndicator(
+                            value: total > 0
+                                ? ((completed ?? 0) / total).clamp(0.0, 1.0)
+                                : 0,
+                            minHeight: 5,
+                            color: _bookAccent,
+                            backgroundColor: const Color(0xffeee7d9),
+                          ),
                         ),
-                      ),
                       const SizedBox(height: 8),
                       Text(
-                        completed == null || characters == null
+                        interview || completed == null || characters == null
                             ? '${book['chapter_count']} 章已成稿'
                             : '$completed/$total 章 · $characters 字',
                         style: Theme.of(context).textTheme.bodySmall,
                       ),
+                      if (interview && widget.onContinue != null)
+                        TextButton(
+                          onPressed: widget.busy
+                              ? null
+                              : () => widget.onContinue!(book['id'] as String),
+                          child: const Text('继续访谈'),
+                        ),
                       if (current) ...[
                         const SizedBox(height: 8),
                         const Text(

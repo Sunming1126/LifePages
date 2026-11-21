@@ -12,7 +12,9 @@ enum SocialSignIn {
   final String label;
 
   static bool get available =>
-      !kIsWeb && defaultTargetPlatform == TargetPlatform.iOS;
+      !kIsWeb &&
+      (defaultTargetPlatform == TargetPlatform.iOS ||
+          defaultTargetPlatform == TargetPlatform.android);
 
   Future<String?> idToken() async {
     FirebaseAuth? auth;

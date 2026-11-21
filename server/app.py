@@ -9,15 +9,16 @@ import os
 import re
 import secrets
 import sqlite3
+import struct
 import time
 import uuid
 import wave
 import weakref
-from contextlib import aclosing, closing
+from contextlib import AsyncExitStack, aclosing, asynccontextmanager, closing
 from contextvars import ContextVar
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional
 from urllib.parse import urlparse
 
 import httpx
@@ -26,7 +27,7 @@ from fastapi import FastAPI, Header, HTTPException, Request, WebSocket, WebSocke
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field, StrictBool
 
-from server import book_store as books, chapter_sharing, chat_sessions, memory
+from server import book_store as books, chapter_sharing, chat_sessions, interview, memory
 from server.account_access import bearer_digest, resolve_account, token_hash
 from server.memory_vectors import VectorIndex
 
@@ -39,7 +40,21 @@ DATA.chmod(0o700)
 (DATA / 'accounts').mkdir(exist_ok=True, mode=0o700)
 ACCOUNT = ContextVar('lifepages_account', default=None)
 REGISTRY = DATA / 'registry.sqlite3'
-app = FastAPI(title='LifePages API', docs_url=None, redoc_url=None)
+
+
+@asynccontextmanager
+async def lifespan(app):
+    # Keep the upstream TLS connection available between chat turns.
+    limits = httpx.Limits(max_connections=100, max_keepalive_connections=20, keepalive_expiry=60)
+    async with httpx.AsyncClient(timeout=45, limits=limits) as client:
+        app.state.streaming_llm_client = client
+        try:
+            yield
+        finally:
+            del app.state.streaming_llm_client
+
+
+app = FastAPI(title='LifePages API', docs_url=None, redoc_url=None, lifespan=lifespan)
 
 
 def registry():
@@ -149,9 +164,15 @@ class ChatTurn(BaseModel):
     request_id: str = Field(pattern=r'^[0-9a-f]{32}$')
     text: str = Field(min_length=1, max_length=30000)
     audio_base64: Optional[str] = None
+    interview_action: Literal['begin', 'skip', 'next'] | None = None
+    interview_revision: int | None = Field(default=None, ge=0)
 
 class StreamTurn(ChatTurn):
     speak: StrictBool = False
+
+class DeferredVoiceTurn(StreamTurn):
+    audio_base64: None = None
+    payload_hash: str = Field(pattern=r'^[0-9a-f]{64}$')
 
 class Chapter(BaseModel):
     title: str = Field(min_length=1, max_length=200)
@@ -166,13 +187,27 @@ def decode_audio(value):
         raise HTTPException(413, '录音过长，请分段讲述')
     try:
         raw = base64.b64decode(value, validate=True)
+    except ValueError:
+        raise HTTPException(400, '录音格式无效，需使用 16kHz 单声道 WAV') from None
+    return validate_wav(raw)
+
+
+def validate_wav(raw):
+    try:
         import io
         with wave.open(io.BytesIO(raw), 'rb') as f:
             if f.getnchannels() != 1 or f.getframerate() != 16000 or f.getsampwidth() != 2 or f.getcomptype() != 'NONE' or f.getnframes() > 16000 * 185:
                 raise ValueError('format')
         return raw
-    except Exception:
-        raise HTTPException(400, '录音格式无效，需使用 16kHz 单声道 WAV')
+    except (EOFError, ValueError, struct.error, wave.Error):
+        raise HTTPException(400, '录音格式无效，需使用 16kHz 单声道 WAV') from None
+
+
+def turn_digest(text, raw=None):
+    digest = hashlib.sha256(text.encode() + b'\0')
+    if raw is not None:
+        digest.update(raw)
+    return digest.hexdigest()
 
 
 def read_llm_config():
@@ -211,12 +246,21 @@ def llm_rate_limit(response):
     return HTTPException(429, 'AI 回复额度暂时用完，请等额度恢复后点击重试。')
 
 
-async def llm(system, context, *, json_mode=False):
+async def llm(system, context, *, json_mode=False, max_tokens=4096, thinking=None):
     key, base, model = read_llm_config()
     body = {'model': model, 'messages': [{'role': 'system', 'content': system},
-            {'role': 'user', 'content': context}], 'max_tokens': 4096}
+            {'role': 'user', 'content': context}], 'max_tokens': max_tokens}
     if json_mode and model == 'qwen3.7-flash' and urlparse(base).hostname == 'dashscope.aliyuncs.com':
         body.update(enable_thinking=False, response_format={'type': 'json_object'})
+    # Opt-in for the v2 interview only. Ark's DeepSeek V4.1 defaults to
+    # reasoning, which shares max_tokens with the structured final answer.
+    # Do not send provider-specific controls to unknown models/endpoints.
+    if (thinking is False and urlparse(base).hostname == 'ark.cn-beijing.volces.com'
+            and urlparse(base).path.rstrip('/') in ('/api/coding/v3', '/api/plan/v3', '/api/v3')
+            and model.lower() in ('deepseek-v4.1-flash', 'deepseek-v4.1-flash-economy')):
+        body['thinking'] = {'type': 'disabled'}
+        if json_mode:
+            body['response_format'] = {'type': 'json_object'}
     try:
         async with httpx.AsyncClient(timeout=120) as client:
             response = await client.post(base + '/chat/completions', headers={'Authorization': f'Bearer {key}'}, json=body)
@@ -242,7 +286,10 @@ async def stream_llm(system, context):
     if model == 'qwen3.7-flash' and urlparse(base).hostname == 'dashscope.aliyuncs.com':
         body['enable_thinking'] = False
     try:
-        async with httpx.AsyncClient(timeout=45) as client:
+        async with AsyncExitStack() as stack:
+            client = getattr(app.state, 'streaming_llm_client', None)
+            if client is None:
+                client = await stack.enter_async_context(httpx.AsyncClient(timeout=45))
             async with client.stream('POST', base + '/chat/completions',
                                      headers={'Authorization': f'Bearer {key}'}, json=body) as response:
                 # Read the non-streaming error body for quota details.
@@ -346,7 +393,12 @@ def person(pid: str, request: Request, session_id: Optional[str] = None):
         ensure_turn_schema(c)
         if session_id is not None:
             one(c, 'SELECT id FROM chat_sessions WHERE id=? AND person_id=?', (session_id, pid))
-        p['messages'] = chat_sessions.messages_for(c, pid, session_id)
+        visit = interview.find(c, pid)
+        if visit is not None and session_id == visit['session_id']:
+            p['messages'] = interview.history(c, pid)
+            p['interview'] = interview.public_state(c, visit)
+        else:
+            p['messages'] = chat_sessions.messages_for(c, pid, session_id)
         p['chapters'] = [dict(x) for x in c.execute('SELECT * FROM chapters WHERE person_id=? ORDER BY position, rowid', (pid,))]
         return p
 
@@ -628,24 +680,93 @@ async def chat_turn(pid: str, turn: ChatTurn, request: Request):
     require(request)
     async with aclosing(turn_events(pid, turn)) as events:
         result = await anext(events)
-    return {key: result[key] for key in ('user_id', 'assistant_id', 'text')}
+    return {key: value for key, value in result.items() if key != 'type'}
 
 
 @app.post('/api/people/{pid}/turns/stream')
 async def stream_chat_turn(pid: str, turn: StreamTurn, request: Request):
     require(request)
+    return stream_turn_response(pid, turn)
 
+
+@app.post('/api/people/{pid}/voice-turns/stream')
+async def stream_deferred_voice_turn(pid: str, turn: DeferredVoiceTurn, request: Request):
+    require(request)
+    return stream_turn_response(pid, turn, deferred_hash=turn.payload_hash)
+
+
+def stream_turn_response(pid, turn, *, deferred_hash=None):
+    from starlette.background import BackgroundTask
+    async def organize_after_reply():
+        from server import interview_organizer
+        with closing(db()) as c:
+            state = interview.find(c, pid)
+            if state is not None and state['version'] == 2:
+                interview_organizer.schedule(c, pid)
     async def lines():
         try:
-            async with aclosing(turn_events(pid, turn, streaming=True, speak=turn.speak)) as events:
-                async for event in events:
+            from server.turn_stream import events_with_progress
+            events = turn_events(pid, turn, streaming=True, speak=turn.speak, deferred_hash=deferred_hash)
+            async with aclosing(events_with_progress(events, turn.request_id)) as progress:
+                async for event in progress:
                     yield json.dumps(event, ensure_ascii=False) + '\n'
         except HTTPException as exc:
-            yield json.dumps({'type': 'error', 'detail': exc.detail}, ensure_ascii=False) + '\n'
+            yield json.dumps({'type': 'error', 'detail': exc.detail, 'status': exc.status_code}, ensure_ascii=False) + '\n'
 
-    return StreamingResponse(lines(), media_type='application/x-ndjson', headers={
+    return StreamingResponse(lines(), media_type='application/x-ndjson', background=BackgroundTask(organize_after_reply), headers={
         'X-Accel-Buffering': 'no', 'Cache-Control': 'no-store',
     })
+
+
+@app.put('/api/people/{pid}/voice-turns/{request_id}/audio')
+async def upload_turn_audio(pid: str, request_id: str, request: Request):
+    require(request)
+    raw = bytearray()
+    async for chunk in request.stream():
+        if len(raw) + len(chunk) > 6_000_000:
+            raise HTTPException(413, '录音过长，请分段讲述')
+        raw.extend(chunk)
+    validate_wav(raw)
+    await asyncio.to_thread(attach_turn_audio, pid, request_id, raw)
+    return Response(status_code=204)
+
+
+def attach_turn_audio(pid, request_id, raw):
+    with closing(db()) as c, c:
+        ensure_turn_schema(c)
+        c.execute('BEGIN IMMEDIATE')
+        books.active(c, pid)
+        row = one(c, '''SELECT m.id,m.text,m.audio,t.payload_hash FROM chat_turns t
+            JOIN messages m ON m.id=t.user_id
+            WHERE t.request_id=? AND t.person_id=? AND t.assistant_id IS NOT NULL''',
+                  (request_id, pid))
+        if not hmac.compare_digest(row['payload_hash'], turn_digest(row['text'], raw)):
+            raise HTTPException(409, '录音与原消息不匹配')
+        if row['audio']:
+            return
+        target = account_dir() / 'audio' / (row['id'] + '.wav')
+        temp = target.with_suffix(f'.{uuid.uuid4().hex}.tmp')
+        try:
+            with temp.open('xb') as audio:
+                temp.chmod(0o600)
+                audio.write(raw)
+                audio.flush()
+                os.fsync(audio.fileno())
+            temp.replace(target)
+            c.execute('UPDATE messages SET audio=? WHERE id=?', (target.name, row['id']))
+            withheld = (interview.find(c, pid)
+                        and row['id'] in interview.withheld_recordings(interview.answers_for(c, pid)))
+            if withheld:
+                c.execute('''INSERT OR IGNORE INTO chapter_audio SELECT s.chapter_id,s.message_id
+                    FROM chapter_sources s WHERE s.message_id=? AND NOT EXISTS (
+                        SELECT 1 FROM book_topics t JOIN interview_chapters i ON i.topic_id=t.id
+                        WHERE t.chapter_id=s.chapter_id)''', (row['id'],))
+            else:
+                c.execute('''INSERT OR IGNORE INTO chapter_audio SELECT chapter_id,message_id
+                    FROM chapter_sources WHERE message_id=?''', (row['id'],))
+            c.commit()
+        finally:
+            temp.unlink(missing_ok=True)
 
 
 def speech_boundary(text, first):
@@ -654,12 +775,16 @@ def speech_boundary(text, first):
     return end or (96 if len(text) >= 96 else 0)
 
 
-async def turn_events(pid, turn, *, streaming=False, speak=False):
+async def turn_events(pid, turn, *, streaming=False, speak=False, deferred_hash=None):
     text = turn.text.strip()
     if not text:
         raise HTTPException(400, '请填写聊天内容')
     raw = decode_audio(turn.audio_base64) if turn.audio_base64 else None
-    digest = hashlib.sha256(text.encode() + b'\0' + (raw or b'')).hexdigest()
+    digest = deferred_hash or turn_digest(text, raw)
+    if turn.interview_action is not None:
+        if raw or deferred_hash or turn.interview_revision is None:
+            raise HTTPException(400, '无效的访谈操作')
+        digest = turn_digest(f'{turn.interview_action}:{turn.interview_revision}:{text}', None)
     lock_key = f'{ACCOUNT.get()}:{pid}'
     lock = _turn_locks.get(lock_key)
     if lock is None:
@@ -673,7 +798,11 @@ async def turn_events(pid, turn, *, streaming=False, speak=False):
             p = dict(one(c, 'SELECT * FROM people WHERE id=?', (pid,)))
             sid = turn.session_id or pid
             topic = None
-            if books.managed(c):
+            visit = interview.find(c, pid)
+            if visit is not None and sid == visit['session_id']:
+                books.active(c, pid)
+            elif books.managed(c):
+                visit = None
                 topic = books.topic(c, pid, sid)
                 if not topic['opened']:
                     raise HTTPException(409, '请先打开本章')
@@ -689,10 +818,18 @@ async def turn_events(pid, turn, *, streaming=False, speak=False):
                 mid = existing['user_id']
                 if existing['assistant_id']:
                     reply = one(c, 'SELECT text FROM messages WHERE id=?', (existing['assistant_id'],))
+                    progress = {'interview': interview.public_state(c, visit)} if visit else {}
                     c.commit()
-                    yield {'type': 'done', 'user_id': mid, 'assistant_id': existing['assistant_id'], 'text': reply['text']}
+                    yield {'type': 'done', 'user_id': mid, 'assistant_id': existing['assistant_id'], 'text': reply['text'], **progress}
                     return
-            else:
+            if turn.interview_action is not None:
+                if visit is None or turn.interview_revision != visit['revision']:
+                    raise HTTPException(409, '访谈已有新进度，请刷新后继续')
+                number = visit['question']
+                if (turn.interview_action == 'begin' and number != 0 or turn.interview_action in ('skip', 'next')
+                        and not 1 <= number <= (30 if visit['version'] == 2 else len(interview.BANKS[visit['version']]))):
+                    raise HTTPException(409, '当前没有可执行的访谈操作')
+            if not existing:
                 mid = uuid.uuid4().hex
                 audio_path = account_dir() / 'audio' / (mid + '.wav')
                 try:
@@ -701,9 +838,9 @@ async def turn_events(pid, turn, *, streaming=False, speak=False):
                         audio_path.chmod(0o600)
                     c.execute('INSERT INTO messages(id,person_id,role,text,audio) VALUES(?,?,?,?,?)', (mid, pid, 'user', text, audio_path.name if raw else None))
                     chat_sessions.bind(c, pid, sid, mid)
-                    if raw:
+                    if raw or deferred_hash:
                         chapter_sharing.remember_question(c, pid, sid, mid)
-                    if topic is None and sid != pid and not memory.PRIVATE.search(text):
+                    if topic is None and visit is None and sid != pid and not memory.PRIVATE.search(text):
                         chat_sessions.title_from_first_message(c, sid, text)
                     c.execute('INSERT INTO chat_turns(request_id,person_id,payload_hash,user_id) VALUES(?,?,?,?)', (turn.request_id, pid, digest, mid))
                 except Exception:
@@ -711,22 +848,35 @@ async def turn_events(pid, turn, *, streaming=False, speak=False):
                     audio_path.unlink(missing_ok=True)
                     raise
             c.commit()
-        with closing(db()) as c, c:
-            books.active(c, pid)
-            remembered = memory.remember(c, pid, mid, text, sid)
-        messages, entries = await recall(pid, '' if remembered else text, mid, sid)
-        context = f"称呼：{p['name']}\n背景：{p['background']}\n最近对话：\n" + '\n'.join(
-            ('讲述者：' if row['role'] == 'user' else '助手：') + row['text'] for row in messages
-        )
-        context += memory_context(entries)
-        if remembered:
-            context += '\n记忆操作结果：' + remembered
-        system = '你是一位温暖、耐心的 AI 聊天伙伴。自然回应讲述者此刻的话题，先倾听和回应，不要每次都追问；在适合时温和、开放地邀请对方分享人生经历、感受或选择。尊重隐私与换话题，不假设、编造或确认对方没说过的事实，回答简洁自然，不使用 Markdown。'
-        if topic:
-            context = f"本章主题：{topic['title']}\n开场问题：{topic['question']}\n" + context
-            system += ('先回应讲述者刚说的内容。缺细节时一次温和追问一个具体点。'
-                       '可以自然接住闲聊，再在合适时机回到本章。对方想跳过时就停下，'
-                       '不能把开场问题里假设的人或经历当作事实。')
+        if visit:
+            with closing(db()) as c:
+                response, number, attempts, updates = await interview.respond(
+                    c, visit, mid, text, turn.interview_action, llm)
+        else:
+            with closing(db()) as c, c:
+                books.active(c, pid)
+                remembered = memory.remember(c, pid, mid, text, sid)
+            messages, entries = await recall(pid, '' if remembered else text, mid, sid)
+            context = f"称呼：{p['name']}\n背景：{p['background']}\n最近对话：\n" + '\n'.join(
+                ('讲述者：' if row['role'] == 'user' else '助手：') + row['text'] for row in messages
+            )
+            context += memory_context(entries)
+            if remembered:
+                context += '\n记忆操作结果：' + remembered
+            system = '你是一位温暖、耐心的 AI 聊天伙伴。自然回应讲述者此刻的话题，先倾听和回应，不要每次都追问；在适合时温和、开放地邀请对方分享人生经历、感受或选择。尊重隐私与换话题，不假设、编造或确认对方没说过的事实，回答简洁自然，不使用 Markdown。'
+            if topic:
+                context = f"本章主题：{topic['title']}\n开场问题：{topic['question']}\n" + context
+                system += ('先回应讲述者刚说的内容。缺细节时一次温和追问一个具体点。'
+                           '可以自然接住闲聊，再在合适时机回到本章。对方想跳过时就停下，'
+                           '不能把开场问题里假设的人或经历当作事实。')
+
+        async def deltas():
+            if visit:
+                yield response
+            else:
+                async with aclosing(stream_llm(system, context)) as stream:
+                    async for delta in stream:
+                        yield delta
         if streaming:
             if speak:
                 with closing(db()) as c, c:
@@ -744,8 +894,8 @@ async def turn_events(pid, turn, *, streaming=False, speak=False):
                 return {'type': 'speech', 'segment': index}
 
             parts, speech, index = [], '', 0
-            async with aclosing(stream_llm(system, context)) as deltas:
-                async for delta in deltas:
+            async with aclosing(deltas()) as stream:
+                async for delta in stream:
                     parts.append(delta)
                     yield {'type': 'delta', 'text': delta}
                     if speak:
@@ -759,7 +909,7 @@ async def turn_events(pid, turn, *, streaming=False, speak=False):
                 raise HTTPException(502, 'AI 回复为空，请点击重试。')
             if speech.strip():
                 yield save_segment(index, speech.strip())
-        else:
+        elif not visit:
             response = await llm(system, context)
         with closing(db()) as c:
             c.execute('BEGIN IMMEDIATE')
@@ -767,17 +917,23 @@ async def turn_events(pid, turn, *, streaming=False, speak=False):
             current = one(c, 'SELECT assistant_id FROM chat_turns WHERE request_id=?', (turn.request_id,))
             if current['assistant_id']:
                 existing_reply = one(c, 'SELECT text FROM messages WHERE id=?', (current['assistant_id'],))
+                progress = {'interview': interview.public_state(c, interview.find(c, pid))} if visit else {}
                 c.commit()
-                yield {'type': 'done', 'user_id': mid, 'assistant_id': current['assistant_id'], 'text': existing_reply['text']}
+                yield {'type': 'done', 'user_id': mid, 'assistant_id': current['assistant_id'], 'text': existing_reply['text'], **progress}
                 return
             aid = uuid.uuid4().hex
             c.execute('INSERT INTO messages(id,person_id,role,text) VALUES(?,?,?,?)', (aid, pid, 'assistant', response))
             chat_sessions.bind(c, pid, sid, aid)
-            if topic:
-                c.execute('UPDATE books SET updated=CURRENT_TIMESTAMP WHERE id=?', (pid,))
             c.execute('UPDATE chat_turns SET assistant_id=? WHERE request_id=?', (aid, turn.request_id))
+            progress = {'interview': interview.commit(c, visit, mid, number, attempts, updates)} if visit else {}
+            if topic or visit:
+                c.execute('UPDATE books SET updated=CURRENT_TIMESTAMP WHERE id=?', (pid,))
             c.commit()
-        yield {'type': 'done', 'user_id': mid, 'assistant_id': aid, 'text': response}
+        if visit and visit['version'] == 2 and not streaming:
+            from server import interview_organizer
+            with closing(db()) as c:
+                interview_organizer.schedule(c, pid)
+        yield {'type': 'done', 'user_id': mid, 'assistant_id': aid, 'text': response, **progress}
 
 
 @app.post('/api/people/{pid}/answers')
@@ -1131,6 +1287,7 @@ def private_audio(mid: str, request: Request):
 
 from server.book_api import router as book_router
 from server.book_manuscript import router as manuscript_router
+from server.interview_api import router as interview_router
 from server.legal import router as legal_router
 from server.question_refresh import router as question_router
 from server import account_profile, email_auth, email_password, firebase_auth
@@ -1139,6 +1296,7 @@ init_registry()
 
 app.include_router(book_router)
 app.include_router(manuscript_router)
+app.include_router(interview_router)
 app.include_router(question_router)
 app.include_router(email_auth.router)
 app.include_router(email_password.router)
