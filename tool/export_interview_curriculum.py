@@ -28,7 +28,7 @@ def render():
             for cell in q.criteria:
                 lines.append('| ' + ' | '.join(vars(cell).values()) + ' |')
             lines.append('')
-    return '\n'.join(lines) + '\n'
+    return '\n'.join(lines).rstrip() + '\n'
 
 
 if __name__ == '__main__':

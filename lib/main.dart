@@ -31,10 +31,10 @@ final api = Api();
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  unawaited(restoreAutomaticReplyAudio());
   if (Platform.isAndroid) {
     runApp(const LifePages());
     unawaited(restoreReadingScale());
-    unawaited(restoreAutomaticReplyAudio());
     WidgetsBinding.instance.addPostFrameCallback((_) {
       unawaited(LiquidGlassWidgets.initialize(enablePerformanceMonitor: false));
     });

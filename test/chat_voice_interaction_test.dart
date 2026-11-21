@@ -13,6 +13,8 @@ import 'package:life_pages/main.dart';
 import 'package:life_pages/onesay_voice_widgets.dart';
 import 'package:life_pages/rtc_reply_player.dart';
 import 'package:life_pages/voice_io.dart';
+import 'package:life_pages/voice_preferences.dart';
+import 'package:life_pages/reading_preferences.dart';
 import 'package:record/record.dart';
 
 class Capture extends VoiceCapture {
@@ -231,6 +233,23 @@ class ChatApi extends Api {
 
 class ReplyPlayerProbe extends RtcReplyPlayer {
   int stops = 0;
+  int warms = 0;
+  final releases = <Duration>[];
+
+  @override
+  Future<void> preconnect(
+    String bookId,
+    RtcRequest request, {
+    required String voiceId,
+  }) async {
+    warms++;
+  }
+
+  @override
+  void releaseWarm({Duration grace = Duration.zero}) {
+    releases.add(grace);
+  }
+
   final segments = <List<int>>[];
 
   @override
@@ -387,6 +406,39 @@ void main() {
     await flush(tester);
     return gesture;
   }
+
+  testWidgets(
+    'iOS and Android preconnect and release RTC on consent revocation',
+    (tester) async {
+      automaticReplyAudio.value = true;
+      FlutterSecureStorage.setMockInitialValues({
+        'ai_consent_v2_p': 'yes',
+        'rtc_reply_consent_v2_p': 'yes',
+      });
+      final player = ReplyPlayerProbe();
+      await tester.pumpWidget(harness(player: player));
+      await flush(tester);
+      expect(player.warms, greaterThan(0));
+      final prepared = player.warms;
+      replyVoiceRevision.value++;
+      await flush(tester);
+      expect(player.warms, greaterThan(prepared));
+      await const FlutterSecureStorage().delete(key: 'rtc_reply_consent_v2_p');
+      replyAudioConsentRevision.value++;
+      await flush(tester);
+      expect(player.releases, contains(Duration.zero));
+      final revoked = player.warms;
+      replyVoiceRevision.value++;
+      await flush(tester);
+      expect(player.warms, revoked);
+      await tester.pumpWidget(const SizedBox());
+      await flush(tester);
+    },
+    variant: TargetPlatformVariant({
+      TargetPlatform.iOS,
+      TargetPlatform.android,
+    }),
+  );
 
   testWidgets(
     'assistant text comes first and can be selected, copied and refreshed',
@@ -863,125 +915,37 @@ void main() {
     expect(capture.starts, 0);
   });
 
-  testWidgets('chapter directory switches history and routes new messages', (
-    tester,
-  ) async {
-    api.history = [
-      {'id': 'old', 'role': 'user', 'text': '只属于第一章'},
-    ];
-    for (var number = 3; number <= 26; number++) {
-      api.topics.add({
-        'id': 'p$number',
-        'number': number,
-        'title': '测试章节 $number',
-        'theme': '故土与根脉',
-        'character_count': 0,
-      });
-    }
-    await tester.pumpWidget(
-      RepaintBoundary(key: const ValueKey('modal-screen'), child: harness()),
-    );
-    await flush(tester);
-    expect(find.text('只属于第一章'), findsOneWidget);
-    await tester.tap(find.byKey(const ValueKey('assistant-keyboard-mode')));
-    await tester.pump();
-    await tester.enterText(find.byType(TextField), '留在第一章的草稿');
-
-    Future<void> openSessionSheet() async {
+  testWidgets(
+    'legacy chat hides chapter navigation and keeps its conversation',
+    (tester) async {
+      api.history = [
+        {'id': 'old', 'role': 'user', 'text': '旧书已经讲过的故事'},
+      ];
+      await tester.pumpWidget(harness());
+      await flush(tester);
+      expect(find.text('旧书已经讲过的故事'), findsOneWidget);
+      expect(find.text('第 1 章 · 故乡的轮廓'), findsNothing);
+      expect(
+        find.byKey(const ValueKey('assistant-history-button')),
+        findsNothing,
+      );
+      await tester.tap(find.byKey(const ValueKey('assistant-keyboard-mode')));
+      await tester.pump();
+      await tester.enterText(find.byType(TextField), '继续讲原来的故事');
       await tester.tap(find.byKey(const ValueKey('assistant-settings-button')));
       await tester.pumpAndSettle();
-      expect(find.text('章节目录'), findsOneWidget);
-      final sheet = tester.getRect(
-        find.byKey(const ValueKey('chat-bottom-sheet')),
-      );
-      final nav = tester.getRect(find.byType(OneSayChatNavigation));
-      expect(sheet.left, lessThanOrEqualTo(nav.left));
-      expect(sheet.right, greaterThanOrEqualTo(nav.right));
-      expect(sheet.top, lessThan(nav.top));
-      expect(sheet.bottom, greaterThan(nav.bottom));
-    }
-
-    final delayed = Completer<void>();
-    api.topicBlock = delayed;
-    await openSessionSheet();
-    expect(find.text('家族的记忆'), findsOneWidget);
-    final scrollbar = find.byKey(const ValueKey('chapter-directory-scrollbar'));
-    final widget = tester.widget<RawScrollbar>(scrollbar);
-    expect(widget.thumbVisibility, isTrue);
-    expect(widget.scrollbarOrientation, ScrollbarOrientation.right);
-    final controller = widget.controller!;
-    expect(controller.position.maxScrollExtent, greaterThan(0));
-    final listBounds = tester.getRect(scrollbar);
-    await tester.dragFrom(
-      Offset(listBounds.right - 4, listBounds.top + 24),
-      const Offset(0, 120),
-    );
-    await tester.pumpAndSettle();
-    expect(controller.offset, greaterThan(0));
-    controller.jumpTo(0);
-    await tester.pumpAndSettle();
-    final inFlight = api.topicRequests;
-    await tester.tap(find.byTooltip('关闭'));
-    await tester.pumpAndSettle();
-    await openSessionSheet();
-    expect(api.topicRequests, inFlight);
-    delayed.completeError(Exception('离线'));
-    api.topicBlock = null;
-    await tester.pumpAndSettle();
-    expect(find.text('家族的记忆'), findsOneWidget);
-    await captureLayout(
-      tester,
-      'chat-topic-sheet-headless',
-      boundaryKey: 'modal-screen',
-    );
-    final beforeSwitch = api.historyRequests;
-    api.supportsCombinedActivation = true;
-    api.sessionMessages['p2'] = [
-      {'id': 'opener', 'role': 'assistant', 'text': '说说家里的长辈吧。'},
-    ];
-    final firstActivation = api.activationBlock = Completer<void>();
-    await tester.tap(find.text('家族的记忆'));
-    await tester.pumpAndSettle();
-    expect(find.text('第 2 章 · 家族的记忆'), findsOneWidget);
-    expect(find.text('正在加载本章聊天…'), findsOneWidget);
-    expect(find.text('只属于第一章'), findsNothing);
-    firstActivation.complete();
-    api.activationBlock = null;
-    await tester.pumpAndSettle();
-    expect(find.text('说说家里的长辈吧。'), findsOneWidget);
-    expect(api.historyRequests, beforeSwitch);
-    final newId = api.activeSession;
-    expect(newId, isNot('p'));
-    expect(find.text('只属于第一章'), findsNothing);
-
-    expect(find.text('留在第一章的草稿'), findsNothing);
-    await tester.enterText(find.byType(TextField), '只属于第二章');
-    await tester.pump();
-    await tester.tap(find.byKey(const ValueKey('assistant-send-button')));
-    await flush(tester);
-    expect(api.turns.single['session_id'], newId);
-
-    await openSessionSheet();
-    final returnActivation = api.activationBlock = Completer<void>();
-    await tester.tap(find.text('故乡的轮廓'));
-    await tester.pumpAndSettle();
-    expect(api.activeSession, newId);
-    expect(find.text('第 1 章 · 故乡的轮廓'), findsOneWidget);
-    expect(find.text('只属于第一章'), findsOneWidget);
-    expect(find.text('留在第一章的草稿'), findsOneWidget);
-    expect(find.text('只属于第二章'), findsNothing);
-    returnActivation.completeError(Exception('离线'));
-    api.activationBlock = null;
-    await tester.pumpAndSettle();
-    expect(find.text('只属于第一章'), findsOneWidget);
-    api.supportsCombinedActivation = false;
-    final beforeRetry = api.historyRequests;
-    await tester.tap(find.text('本章未同步，点此重试'));
-    await tester.pumpAndSettle();
-    expect(api.activeSession, 'p');
-    expect(api.historyRequests, beforeRetry + 1);
-    expect(find.text('只属于第一章'), findsOneWidget);
-  });
+      expect(find.text('章节目录'), findsNothing);
+      expect(find.text('家族的记忆'), findsNothing);
+      expect(find.text('本章未完成的输入'), findsOneWidget);
+      await tester.tapAt(const Offset(10, 10));
+      await tester.pumpAndSettle();
+      expect(find.text('继续讲原来的故事'), findsOneWidget);
+      await tester.tap(find.byKey(const ValueKey('assistant-send-button')));
+      await flush(tester);
+      expect(api.turns.single['session_id'], 'p');
+      expect(find.text('旧书已经讲过的故事'), findsOneWidget);
+    },
+  );
 
   testWidgets('cancelled pointer ends the in-composer recording', (
     tester,

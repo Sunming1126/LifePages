@@ -36,6 +36,8 @@ String chapterImagePath(String bookId, String topicId, String imageId) =>
 Future<String> loadChapterImage(Api client, String path) async =>
     (await client.call('GET', path))['data'] as String;
 
+class EmptyInterviewManuscript implements Exception {}
+
 class ChapterOpening {
   const ChapterOpening._(
     this._topics,
@@ -72,7 +74,10 @@ class ChapterOpening {
     ).query;
     final data = await client.call('GET', '$path?$query') as Map;
     final topics = _readRows(data['topics']);
-    if (topics.isEmpty) throw StateError('请先在访谈中整理并保存书稿');
+    if (topics.isEmpty) {
+      if (interview) throw EmptyInterviewManuscript();
+      throw StateError('请先在访谈中整理并保存书稿');
+    }
     final initial =
         topics.where((row) => row['id'] == last).firstOrNull ??
         topics.where((row) => row['id'] == data['active_id']).firstOrNull ??
@@ -148,6 +153,7 @@ class _ChapterEditorState extends State<ChapterEditor>
   String? _insertId, _insertFingerprint;
   Object? _saveError;
   bool _working = false, _dirty = false, _saving = false;
+  bool _emptyInterview = false;
   bool _supportsCombinedLoad = false;
   _EditorAction? _progress;
   _Row? _pendingInsert;
@@ -265,6 +271,7 @@ class _ChapterEditorState extends State<ChapterEditor>
       setState(() {
         _working = true;
         _loadError = null;
+        _emptyInterview = false;
       });
     }
     try {
@@ -299,7 +306,12 @@ class _ChapterEditorState extends State<ChapterEditor>
         }
       }
     } catch (error) {
-      if (mounted && cold) setState(() => _loadError = errorText(error));
+      if (mounted && cold) {
+        setState(() {
+          _emptyInterview = error is EmptyInterviewManuscript;
+          if (!_emptyInterview) _loadError = errorText(error);
+        });
+      }
     } finally {
       if (mounted && cold) setState(() => _working = false);
     }
@@ -1105,12 +1117,21 @@ class _ChapterEditorState extends State<ChapterEditor>
             ),
           ],
         ),
-        bottomNavigationBar: keyboard || (topic == null && _loadError != null)
+        bottomNavigationBar:
+            keyboard || _emptyInterview || (topic == null && _loadError != null)
             ? null
             : _toolbar(topic != null && enabled),
         body: topic == null
             ? Center(
-                child: _loadError == null
+                child: _emptyInterview
+                    ? const Padding(
+                        padding: EdgeInsets.all(32),
+                        child: Text(
+                          '还没有可编辑的章节\n访谈素材整理并保存成书后，就可以在这里编辑。',
+                          textAlign: TextAlign.center,
+                        ),
+                      )
+                    : _loadError == null
                     ? const _OpeningPlaceholder()
                     : Column(
                         mainAxisSize: MainAxisSize.min,

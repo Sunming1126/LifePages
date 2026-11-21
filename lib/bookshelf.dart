@@ -18,10 +18,15 @@ Future<BookRecord?> newBookSheet(
   BuildContext context,
   Api client, {
   bool interview = false,
+  int interviewVersion = 1,
 }) async {
   final form = GlobalKey<FormState>();
   final data = <String, dynamic>{
-    if (interview) 'interview': true else 'template_id': 'life',
+    if (interview) ...{
+      'interview': true,
+      if (interviewVersion == 2) 'interview_version': 2,
+    } else
+      'template_id': 'life',
   };
   List? templates;
   var templateName = '完整人生（26 章）';
@@ -274,10 +279,6 @@ class _BookshelfState extends State<Bookshelf> {
   Future<void> _openEditor(BuildContext context, BookRecord book) async {
     final id = book['id'] as String;
     final interview = book['interview_version'] != null;
-    if (interview && book['chapter_count'] == 0 && widget.onContinue != null) {
-      widget.onContinue!(id);
-      return;
-    }
     await Navigator.of(context).push(
       MaterialPageRoute<void>(
         builder: (_) => ChapterEditor(
