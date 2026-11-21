@@ -31,6 +31,7 @@ class ShelfApi extends Api {
   Completer<List<Map<String, dynamic>>>? previewResponse;
   Completer<void>? editorGate;
   int editorRequests = 0;
+  bool? editorInterviewOnly;
   int editorRevision = 0;
   String editorText = '这是已保存的正文。';
   final previewRows = <Map<String, dynamic>>[];
@@ -123,6 +124,7 @@ class ShelfApi extends Api {
       final editor = uri.queryParameters['editor'] == 'true';
       if (editor) {
         editorRequests++;
+        editorInterviewOnly = uri.queryParameters['interview_only'] == 'true';
         await editorGate?.future;
       }
       return {
@@ -602,73 +604,83 @@ void main() {
     variant: TargetPlatformVariant.only(TargetPlatform.iOS),
   );
 
-  testWidgets(
-    'cold entry opens immediately and reentry shows cached text while offline',
-    (tester) async {
-      FlutterSecureStorage.setMockInitialValues({});
-      final dir = Directory.systemTemp.createTempSync('lifepages-prefetch-');
-      addTearDown(() => dir.deleteSync(recursive: true));
-      final gate = Completer<void>();
-      final client = ShelfApi()..editorGate = gate;
-      await tester.pumpWidget(
-        MaterialApp(
-          home: ChatShell(client: client, documentsDirectory: () async => dir),
-        ),
-      );
-      await settleShelf(tester);
-      expect(client.editorRequests, 1);
-      final nav = find.byType(OneSayChatNavigation);
-      await tester.tap(
-        find.descendant(of: nav, matching: find.text('书架')).first,
-      );
-      await tester.pumpAndSettle();
-      await tester.tap(find.byType(BookCover));
-      await tester.pumpAndSettle();
-      final editor = find.byType(ChapterEditor);
-      expect(editor, findsOneWidget);
-      expect(
-        find.descendant(
-          of: editor,
-          matching: find.byType(CircularProgressIndicator),
-        ),
-        findsNothing,
-      );
-      expect(client.editorRequests, 1);
-      gate.complete();
-      await settleShelf(tester);
-      expect(find.text('这是已保存的正文。'), findsOneWidget);
-      await tester.tap(find.byType(BackButton));
-      await tester.pumpAndSettle();
-      final retry = Completer<void>();
-      client.editorGate = retry;
-      await tester.tap(find.byType(BookCover));
-      await tester.pumpAndSettle();
-      expect(find.text('这是已保存的正文。'), findsOneWidget);
-      expect(client.editorRequests, 2);
-      retry.completeError(Exception('临时离线'));
-      await tester.pumpAndSettle();
-      expect(find.text('这是已保存的正文。'), findsOneWidget);
+  for (final interview in [false, true]) {
+    testWidgets(
+      'immediate editor and offline cache; interview=$interview',
+      (tester) async {
+        FlutterSecureStorage.setMockInitialValues({});
+        final dir = Directory.systemTemp.createTempSync('lifepages-prefetch-');
+        addTearDown(() => dir.deleteSync(recursive: true));
+        final gate = Completer<void>();
+        final client = ShelfApi()..editorGate = gate;
+        if (interview) client.books.single['interview_version'] = 2;
+        await tester.pumpWidget(
+          MaterialApp(
+            home: ChatShell(
+              client: client,
+              documentsDirectory: () async => dir,
+            ),
+          ),
+        );
+        await settleShelf(tester);
+        expect(client.editorRequests, 1);
+        expect(client.editorInterviewOnly, interview);
+        final nav = find.byType(OneSayChatNavigation);
+        await tester.tap(
+          find.descendant(of: nav, matching: find.text('书架')).first,
+        );
+        await tester.pumpAndSettle();
+        await tester.tap(find.byType(BookCover));
+        await tester.pump();
+        final editor = find.byType(ChapterEditor);
+        expect(editor, findsOneWidget);
+        expect(
+          find.descendant(
+            of: editor,
+            matching: find.byType(CircularProgressIndicator),
+          ),
+          findsNothing,
+        );
+        expect(client.editorRequests, 1);
+        gate.complete();
+        await settleShelf(tester);
+        expect(find.text('这是已保存的正文。'), findsOneWidget);
+        await tester.tap(find.byType(BackButton));
+        await tester.pumpAndSettle();
+        final retry = Completer<void>();
+        client.editorGate = retry;
+        await tester.tap(find.byType(BookCover));
+        await tester.pump();
+        expect(find.text('这是已保存的正文。'), findsOneWidget);
+        expect(client.editorRequests, 2);
+        retry.completeError(Exception('临时离线'));
+        await tester.pumpAndSettle();
+        expect(find.text('这是已保存的正文。'), findsOneWidget);
 
-      await tester.tap(find.byType(BackButton));
-      await tester.pumpAndSettle();
-      final delayed = Completer<void>();
-      client.editorGate = delayed;
-      await tester.tap(find.byType(BookCover));
-      await tester.pumpAndSettle();
-      await tester.enterText(find.byType(TextFormField), '刚刚写下的新内容。');
-      client
-        ..editorRevision = 1
-        ..editorText = '另一台设备写下的内容。';
-      delayed.complete();
-      await settleShelf(tester);
-      expect(find.text('刚刚写下的新内容。'), findsOneWidget);
-      // Leaving awaits the local draft write before Windows removes its file.
-      await tester.pageBack();
-      await settleShelf(tester);
-      await tester.pumpWidget(const SizedBox.shrink());
-    },
-    variant: TargetPlatformVariant.only(TargetPlatform.iOS),
-  );
+        await tester.tap(find.byType(BackButton));
+        await tester.pumpAndSettle();
+        final delayed = Completer<void>();
+        client.editorGate = delayed;
+        await tester.tap(find.byType(BookCover));
+        await tester.pumpAndSettle();
+        await tester.enterText(find.byType(TextFormField), '刚刚写下的新内容。');
+        client
+          ..editorRevision = 1
+          ..editorText = '另一台设备写下的内容。';
+        delayed.complete();
+        await settleShelf(tester);
+        expect(find.text('刚刚写下的新内容。'), findsOneWidget);
+        // Leaving awaits the local draft write before Windows removes its file.
+        await tester.pageBack();
+        await settleShelf(tester);
+        await tester.pumpWidget(const SizedBox.shrink());
+      },
+      variant: TargetPlatformVariant({
+        TargetPlatform.iOS,
+        TargetPlatform.android,
+      }),
+    );
+  }
 
   testWidgets(
     'shelf opens editor directly, with preview in the book menu',
