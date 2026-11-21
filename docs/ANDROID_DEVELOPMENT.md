@@ -186,3 +186,13 @@ Android 模拟器、Android 真机和 iOS 的结果必须分开记录。暂不�
 - v13 将未完成输入的入口放在右上角设置。AI 数据授权和语音播报各在本机确认一次，也适用于随后新建的书。撤回会使旧的单书授权失效。Flutter 全套 46 项、另加的跨书授权回归和静态检查通过。
 - ARM64 Release 包为 `output/LifePages-Android-ARM64-20261120-v13.apk`，versionCode 13，Android 7.0 起，沿用 v11 签名。SHA-256 为 `6c53969b3f4c8fcb007e7e3de52200123ef6185ebafdb51644e7660f42fbc858`。
 - v13 安装成功。API 36 模拟器在启动应用后出现 ADB 和界面响应超时，两本书的授权流程通过 Flutter 组件测试，v13 模拟器交互复验待完成。
+
+
+## 2026-11-22 隐藏主题访谈 v2 安卓同步
+
+- `android` 从 `e9e3ffd` 开始，共同基线为 `origin/main` 的 `c67693a`，已在安卓历史中。同步来源为 `origin/ios/interview-theme-v2` 的 `4fd71377be6e8a1a401bd3fcadb6ff9a26888984`。按依赖顺序应用六个功能提交中的共享 Flutter、后端源码、回归测试和说明文档，无文本冲突。共享同步提交为 `bd549aa`，断流恢复补丁为 `7dd521e`。
+- 共享变更包含 30 个隐藏主题及 120 道精选题、按书保存题序、同主题刷新、自动与提前成章、即时编辑入口及章名正文整理。连接超时、传输异常和回复提前结束均提示保留内容及重试，继续使用同一请求编号与原生原声补传。
+- `flutter analyze --no-pub` 通过，Flutter 全套 64 项通过，WSL 隔离后端测试 97 项通过。模拟器 ARM64 Debug 和 Profile 构建通过。使用现有后端 `/opt/lifepages/releases/20261121-stream-progress`，本次没有部署、迁移或访问真实书稿，平台原生工程、签名和依赖保持原版本。
+- API 36 `LifePages_V13_QA` 模拟器使用独立安卓用户及新建测试访客，仅录入虚构素材。实测文字流式回复、隐藏主题、同主题刷新、进度圆环、94 字提前成章、完整素材自动跳章归零、书架封面直达编辑器、第二章进入目录和手动整理正文。断网触发超时后出现保留和重试提示，联网重试复用原 `request_id`，本地确认的访谈记录只有一条对应原话。
+- 虚构 WAV 通过模拟器麦克风输入，应用完成实际录音、云端转写及原声回放。RTC 与原声回放采集的模拟器输出均包含非静音数据，16 kHz PCM 峰值分别为 734 和 1633。RTC SDK 仍记录 `onRoomBinaryMessageReceived` 回调参数数量不匹配，已测场景的实际音频输出正常。主 AVD 曾在应用启动附近出现 ANR 后以 Windows `0xC0000005` 退出，因此交互验收改在独立 QA AVD。真人麦克风、人工听感、Android 真机及 Mac 端 iOS 回归待验收。
+- 无成稿书可从书架打开完整编辑器，输入后退出并重开可读到已保存草稿。ARM64 Release 输出为 `output/LifePages-Android-ARM64-20261122-v14.apk`，versionCode 14，API 24 起，沿用本机测试签名并通过签名校验。SHA-256 为 `fbc047b8d6cdad4fc42854b28bd32416c229636851b94f90b02fa1ff7e9ec83e`。同一 Release 包在 QA 模拟器安装成功并启动。
