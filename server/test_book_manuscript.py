@@ -25,6 +25,23 @@ class ManuscriptTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.status_code, 200, result.text)
         return tid
 
+    async def test_empty_interview_opens_full_blank_editor_and_saves_manual_text(self):
+        bid = (await self.client.post('/api/books', json={'title': '虚构手写书', 'name': '测试', 'author': '测试',
+            'interview': True, 'interview_version': 2})).json()['id']
+        path = f'/api/books/{bid}/topics?editor=true&include_manuscript=true&interview_only=true'
+        opened = await self.client.get(path)
+        self.assertEqual(opened.status_code, 200, opened.text)
+        value = opened.json()
+        tid = value['active_id']
+        self.assertEqual(value['manuscript']['blocks'], [])
+        self.assertEqual((await self.client.get(path)).json()['active_id'], tid)
+        self.assertEqual((await self.client.get(f'/api/books/{bid}/chapters')).json(), [])
+        saved = await self.client.put(f'/api/books/{bid}/topics/{tid}/manuscript', json={
+            'revision': 0, 'blocks': [{'id': uuid.uuid4().hex, 'kind': 'text', 'text': '这是我自己写下的虚构回忆。'}]})
+        self.assertEqual(saved.status_code, 200, saved.text)
+        restored = (await self.client.get(path)).json()['manuscript']
+        self.assertEqual(restored['blocks'][0]['text'], '这是我自己写下的虚构回忆。')
+
     async def test_templates_and_idempotent_insertion(self):
         templates = (await self.client.get('/api/books/templates')).json()
         self.assertEqual([(row['id'], len(row['chapters'])) for row in templates],

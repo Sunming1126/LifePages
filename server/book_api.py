@@ -172,7 +172,7 @@ def topics(bid: str, request: Request, editor: bool = False,
         if editor:
             books.active(c, bid)
             books.attach_legacy_chapters(c, bid)
-        c.execute('BEGIN')
+        c.execute('BEGIN IMMEDIATE' if editor and interview_only else 'BEGIN')
         books.active(c, bid)
         rows = [dict(row) for row in c.execute('''SELECT t.id,t.number,t.theme,t.title,t.question,ch.content,d.id AS draft_id,
             t.chapter_id FROM book_topics t LEFT JOIN chapters ch ON ch.id=t.chapter_id
@@ -183,6 +183,12 @@ def topics(bid: str, request: Request, editor: bool = False,
             ORDER BY t.number''', (bid, interview_only))]
         for row in rows:
             row['character_count'] = len(''.join((row.pop('content') or '').split()))
+        if editor and interview_only and not rows:
+            number = c.execute('SELECT COALESCE(MAX(number),0)+1 FROM book_topics WHERE book_id=?', (bid,)).fetchone()[0]
+            tid = books.add_topic(c, bid, number, '手写草稿', '未命名章节', '可以直接写下您想记录的内容。')
+            c.execute('INSERT INTO topic_manuscripts(topic_id,blocks,image_count) VALUES(?,?,0)', (tid, '[]'))
+            rows.append({**books.manuscript_snapshot(c, books.topic(c, bid, tid)),
+                         'character_count': 0, 'chapter_id': None})
         selected = chat_sessions.active(c, bid)
         ids = {row['id'] for row in rows}
         active_id = selected if selected in ids else rows[0]['id'] if rows else None
@@ -190,6 +196,7 @@ def topics(bid: str, request: Request, editor: bool = False,
         if editor and include_manuscript and active_id is not None:
             initial_id = preferred_id if preferred_id in ids else active_id
             result['manuscript'] = books.manuscript_snapshot(c, books.topic(c, bid, initial_id))
+        c.commit()
         return result
 
 

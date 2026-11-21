@@ -299,7 +299,10 @@ class InterviewTests(unittest.IsolatedAsyncioTestCase):
         opened = await self.open()
         self.assertNotEqual(legacy, self.session)
         self.assertIn(answer.json()['user_id'], {m['id'] for m in opened['messages']})
-        self.assertEqual((await self.client.get(chapter_route + '?editor=true&interview_only=true')).json()['topics'], [])
+        workspace = (await self.client.get(chapter_route + '?editor=true&interview_only=true')).json()['topics']
+        self.assertEqual(len(workspace), 1)
+        self.assertIsNone(workspace[0]['chapter_id'])
+        self.assertEqual(workspace[0]['blocks'], [])
         await self.client.delete(f'/api/books/{self.bid}')
         backend.authorized(f'Bearer {self.token}')
         with closing(backend.db()) as connection, connection:

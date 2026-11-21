@@ -265,8 +265,20 @@ def adopt(c, bid, proposal, edit, withheld_audio):
         old = c.execute('SELECT questions FROM interview_chapters WHERE topic_id=?', (tid,)).fetchone()[0]
         questions = sorted(set(json.loads(old)).union(proposal['questions']))
     else:
-        number = c.execute('SELECT COALESCE(MAX(number),0)+1 FROM book_topics WHERE book_id=?', (bid,)).fetchone()[0]
-        tid = books.add_topic(c, bid, number, '口述访谈', title, '')
+        blank = c.execute('''SELECT t.id FROM book_topics t JOIN topic_manuscripts m ON m.topic_id=t.id
+            WHERE t.book_id=? AND t.theme='手写草稿' AND t.title='未命名章节'
+            AND t.chapter_id IS NULL AND t.revision=0 AND m.blocks='[]' AND m.image_count=0
+            AND NOT EXISTS(SELECT 1 FROM topic_drafts d WHERE d.topic_id=t.id)
+            AND NOT EXISTS(SELECT 1 FROM topic_images i WHERE i.topic_id=t.id)
+            AND NOT EXISTS(SELECT 1 FROM chat_session_messages sm WHERE sm.session_id=t.id)
+            ORDER BY t.number LIMIT 1''', (bid,)).fetchone()
+        if blank:
+            tid = blank['id']
+            c.execute("UPDATE book_topics SET theme='口述访谈',title=?,question='' WHERE id=?", (title, tid))
+            c.execute('UPDATE chat_sessions SET title=? WHERE id=?', (title, tid))
+        else:
+            number = c.execute('SELECT COALESCE(MAX(number),0)+1 FROM book_topics WHERE book_id=?', (bid,)).fetchone()[0]
+            tid = books.add_topic(c, bid, number, '口述访谈', title, '')
         questions = proposal['questions']
         topic = books.topic(c, bid, tid)
     cid = book_api.adopt_draft(c, topic, {

@@ -75,6 +75,7 @@ def main():
         bid = api('POST', '/api/books', {'title': '部署虚构验证', 'author': '测试', 'name': '林老师',
                                        'interview': True, 'interview_version': 2})['id']
         assert api('GET', '/api/books?include_chat=true')['active_id'] == bid
+        blank_id = api('GET', f'/api/books/{bid}/topics?editor=true&include_manuscript=true&interview_only=true')['active_id']
         path = f'/api/books/{bid}/interview'
         opened = api('POST', path)
         sid, revision = opened['active_id'], opened['interview']['revision']
@@ -106,6 +107,12 @@ def main():
         replay_bid = api('POST', '/api/books', {'title': '虚构灶台对话', 'author': '测试', 'name': '测试',
                                        'interview': True, 'interview_version': 2})['id']
         replay = api('POST', f'/api/books/{replay_bid}/interview')
+        editor_path = f'/api/books/{replay_bid}/topics?editor=true&include_manuscript=true&interview_only=true'
+        editor = api('GET', editor_path)
+        assert len(editor['topics']) == 1 and editor['manuscript']['blocks'] == []
+        assert api('GET', editor_path)['active_id'] == editor['active_id']
+        assert api('GET', f'/api/books/{replay_bid}/chapters') == []
+        print('FULL_EMPTY_EDITOR_IDEMPOTENT_OK', flush=True)
         replay_characters = 0
         for text in ('开始访谈', '最先想起四合院里厨房的灶台', '可以啊'):
             body = {'request_id': uuid.uuid4().hex, 'session_id': replay['active_id'], 'text': text}
@@ -157,6 +164,7 @@ def main():
         assert len(draft['chapters']) == 1
         chapter = api('PUT', path + '/draft/' + draft['id'], {'chapters': draft['chapters']})['chapter_ids'][0]
         listed = api('GET', f'/api/books/{bid}/chapters?include_material=true&interview_only=true')
+        assert listed[0]['topic_id'] == blank_id
         recording = next(n for n in listed[0]['narrations'] if n['has_audio'])
         assert call('GET', f"/api/messages/{recording['id']}/audio") == original
         share = api('POST', f'/api/chapters/{chapter}/share?include_topic_audio=true')

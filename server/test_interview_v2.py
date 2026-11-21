@@ -340,6 +340,8 @@ class ThemeFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(rest['interview']['question'], 2)
 
     async def test_one_theme_one_chapter_with_multiple_questions_and_original_audio(self):
+        editor_path = f'/api/books/{self.bid}/topics?editor=true&include_manuscript=true&interview_only=true'
+        blank = (await self.client.get(editor_path)).json()['active_id']
         opening = await self.begin()
         original_audio = wav()
         first = await self.turn(''.join(chr(0x4e00 + i) for i in range(170)), lambda d: result(d, full=True), audio=original_audio)
@@ -364,6 +366,10 @@ class ThemeFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(saved.status_code, 200, saved.text)
         chapters = (await self.client.get(f'/api/books/{self.bid}/chapters?include_material=true&interview_only=true')).json()
         self.assertEqual(len(chapters), 1)
+        editor = (await self.client.get(editor_path)).json()
+        self.assertEqual(editor['active_id'], blank)
+        self.assertEqual(len(editor['topics']), 1)
+        self.assertEqual(editor['manuscript']['title'], '桥边旧路')
         self.assertEqual({r['id'] for r in chapters[0]['narrations']}, {first['user_id'], last['user_id']})
         cid = chapters[0]['id']
         shared = await self.client.post(f'/api/chapters/{cid}/share?include_topic_audio=true')

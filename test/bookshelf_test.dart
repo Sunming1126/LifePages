@@ -246,7 +246,29 @@ class EmptyInterviewShelfApi extends ShelfApi {
     Map<String, dynamic>? body,
   ]) {
     if (method == 'GET' && Uri.parse(path).path == '/api/books/first/topics') {
-      return Future.value({'topics': []});
+      return Future.value({
+        'topics': [
+          {
+            'id': 'blank',
+            'number': 1,
+            'title': '未命名章节',
+            'theme': '手写草稿',
+            'question': '可以直接写下您想记录的内容。',
+          },
+        ],
+        'active_id': 'blank',
+        'manuscript': {
+          'id': 'blank',
+          'number': 1,
+          'title': '未命名章节',
+          'theme': '手写草稿',
+          'question': '可以直接写下您想记录的内容。',
+          'revision': 0,
+          'blocks': [],
+          'draft_id': null,
+          'has_narrations': false,
+        },
+      });
     }
     return super.call(method, path, body);
   }
@@ -324,12 +346,18 @@ void main() {
   testWidgets(
     'empty interview book cover opens editor instead of chat',
     (tester) async {
+      FlutterSecureStorage.setMockInitialValues({});
+      final directory = Directory.systemTemp.createTempSync(
+        'lifepages-blank-editor-',
+      );
+      addTearDown(() => directory.delete(recursive: true));
       final client = EmptyInterviewShelfApi();
       var continued = false;
       await tester.pumpWidget(
         MaterialApp(
           home: Scaffold(
             body: Bookshelf(
+              documentsDirectory: () async => directory,
               books: client.books,
               activeId: 'first',
               client: client,
@@ -347,7 +375,9 @@ void main() {
       await tester.tap(find.byType(BookCover).first);
       await settleShelf(tester);
       expect(find.byType(ChapterEditor), findsOneWidget);
-      expect(find.textContaining('还没有可编辑的章节'), findsOneWidget);
+      expect(find.textContaining('未命名章节'), findsWidgets);
+      expect(find.text('AI 文字'), findsOneWidget);
+      expect(find.text('从一个画面、一句话或一个人开始写……'), findsOneWidget);
       expect(continued, isFalse);
       expect(find.text('重试'), findsNothing);
     },
