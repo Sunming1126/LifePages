@@ -42,6 +42,33 @@ class ManuscriptTests(unittest.IsolatedAsyncioTestCase):
         restored = (await self.client.get(path)).json()['manuscript']
         self.assertEqual(restored['blocks'][0]['text'], '这是我自己写下的虚构回忆。')
 
+    async def test_organize_titles_whole_chapter_preserves_images_and_rejects_stale_revision(self):
+        bid = (await self.client.get('/api/books')).json()['active_id']
+        tid = await self.open_topic(bid)
+        path = f'/api/books/{bid}/topics/{tid}'
+        image_id, text_id = uuid.uuid4().hex, uuid.uuid4().hex
+        image = base64.b64encode(Path('assets/memoir-cover.jpg').read_bytes()).decode('ascii')
+        self.assertEqual((await self.client.put(path + '/images', json={'id': image_id, 'data': image})).status_code, 200)
+        blocks = [{'id': text_id, 'kind': 'text', 'text': '我小时候常去石桥边等爷爷收工。'},
+                  {'id': uuid.uuid4().hex, 'kind': 'image', 'image_id': image_id}]
+        before = (await self.client.get(path + '/manuscript')).json()
+        saved = (await self.client.put(path + '/manuscript', json={'revision': before['revision'], 'blocks': blocks})).json()
+        proposed = {'title': '石桥边等爷爷', 'blocks': [{'id': text_id, 'text': '小时候，我常在石桥边等爷爷收工。'}]}
+        with patch.object(backend, 'llm', AsyncMock(return_value=json.dumps(proposed))):
+            organized = await self.client.post(path + '/organize', json={'revision': saved['revision']})
+        self.assertEqual(organized.status_code, 200, organized.text)
+        current = organized.json()
+        self.assertEqual(current['title'], '石桥边等爷爷')
+        self.assertEqual(current['blocks'][1]['image_id'], image_id)
+        self.assertEqual(current['blocks'][0]['text'], proposed['blocks'][0]['text'])
+        with patch.object(backend, 'llm', AsyncMock(return_value=json.dumps(proposed))):
+            stale = await self.client.post(path + '/organize', json={'revision': saved['revision']})
+        self.assertEqual(stale.status_code, 409)
+        with patch.object(backend, 'llm', AsyncMock(return_value='{"title":"坏结果","blocks":[]}')):
+            bad = await self.client.post(path + '/organize', json={'revision': current['revision']})
+        self.assertEqual(bad.status_code, 502)
+        self.assertEqual((await self.client.get(path + '/manuscript')).json(), current)
+
     async def test_templates_and_idempotent_insertion(self):
         templates = (await self.client.get('/api/books/templates')).json()
         self.assertEqual([(row['id'], len(row['chapters'])) for row in templates],

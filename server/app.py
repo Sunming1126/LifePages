@@ -921,6 +921,10 @@ async def turn_events(pid, turn, *, streaming=False, speak=False, deferred_hash=
             if topic or visit:
                 c.execute('UPDATE books SET updated=CURRENT_TIMESTAMP WHERE id=?', (pid,))
             c.commit()
+        if visit and visit['version'] == 2:
+            from server import interview_organizer
+            with closing(db()) as c:
+                interview_organizer.schedule(c, pid)
         yield {'type': 'done', 'user_id': mid, 'assistant_id': aid, 'text': response, **progress}
 
 

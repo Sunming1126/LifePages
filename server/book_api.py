@@ -163,7 +163,7 @@ def templates(request: Request):
 
 
 @router.get('/{bid}/topics')
-def topics(bid: str, request: Request, editor: bool = False,
+async def topics(bid: str, request: Request, editor: bool = False,
            include_manuscript: bool = False, preferred_id: str | None = None,
            interview_only: bool = False):
     backend.require(request)
@@ -197,6 +197,9 @@ def topics(bid: str, request: Request, editor: bool = False,
             initial_id = preferred_id if preferred_id in ids else active_id
             result['manuscript'] = books.manuscript_snapshot(c, books.topic(c, bid, initial_id))
         c.commit()
+        if editor and interview_only:
+            from server import interview_organizer
+            result.update(interview_organizer.schedule(c, bid))
         return result
 
 

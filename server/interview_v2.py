@@ -14,6 +14,7 @@ from server import interview_memory
 from server.interview_themes import THEMES, QUESTIONS
 
 MINIMUM = 301
+EARLY_MINIMUM = 30
 AGREEMENT = re.compile(r'(?:可以[啊呀的]?|好[啊呀的]?|嗯[嗯啊]?|行[啊呀]?|您问吧|你问吧)[。！!？?]*')
 SCHEMA = (
     '''CREATE TABLE IF NOT EXISTS book_interview_versions(
@@ -268,15 +269,21 @@ def latest_question(c, state):
     return row if row and row['role'] == 'assistant' and row['text'].endswith(('？', '?')) else None
 
 
+def ready_for_chapter(entry, source):
+    return ((entry['status'] == 'complete' and sufficient(entry, source))
+            or (entry.get('early_requested', False) and count(entry, source) >= EARLY_MINIMUM))
+
+
 def public_state(c, state):
     document, source = load(c, state['book_id']), sources(c, state['book_id'])
     number = state['question']
     current = document['themes'][THEMES[number - 1].id] if 1 <= number <= len(THEMES) else None
-    ready = any(e['status'] == 'complete' and sufficient(e, source) for e in document['themes'].values())
+    ready = any(ready_for_chapter(e, source) for e in document['themes'].values())
     pending = bool(c.execute('SELECT 1 FROM interview_drafts WHERE book_id=? AND saved=0', (state['book_id'],)).fetchone())
     latest = latest_question(c, state) if current else None
     return {'version': 2, 'question': number, 'total': len(THEMES), 'revision': state['revision'],
             'characters': count(current, source) if current else 0, 'minimum_characters': MINIMUM,
+            'early_minimum_characters': EARLY_MINIMUM,
             'can_advance': bool(current and sufficient(current, source)),
             'can_draft': ready or pending, 'refresh_message_id': latest['id'] if latest else None}
 
@@ -290,7 +297,7 @@ def available_excerpts(c, state):
     document = load(c, state['book_id'])
     for number, theme in enumerate(THEMES, 1):
         entry = document['themes'][theme.id]
-        if entry['status'] == 'complete' and sufficient(entry, source):
+        if ready_for_chapter(entry, source):
             for ref in refs(entry['material'], source):
                 if not any(ref['quote'] in old for old in published.get(ref['id'], ())):
                     yield number, ref['id'], ref['quote']
@@ -528,6 +535,7 @@ async def respond(c, state, mid, text, action, llm):
     theme = THEMES[number - 1]
     entry = document['themes'][theme.id]
     if LEAVE.fullmatch(text.strip()):
+        entry['early_requested'] = True
         entry['status'] = 'complete' if sufficient(entry, source) else 'pending'
         response, number = await enter(document, number + 1, source, llm)
         return '好，这段先记到这里。\n' + response, number, 0, updates

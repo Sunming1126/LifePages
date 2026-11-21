@@ -11,6 +11,7 @@ import sqlite3
 import sys
 import urllib.error
 import urllib.request
+import time
 import uuid
 import wave
 
@@ -46,7 +47,15 @@ def main():
         return raw
 
     def api(method, path, body=None, expected=200, auth=True):
-        return json.loads(call(method, path, body, expected, auth))
+        # The exact request ID is retained: a retry cannot duplicate an answer.
+        for attempt in range(3):
+            try:
+                return json.loads(call(method, path, body, expected, auth))
+            except AssertionError as error:
+                if attempt == 2 or '/turns' not in path or 'returned 502' not in str(error):
+                    raise
+                print('MODEL_TURN_RETRY_SAME_REQUEST_ID', flush=True)
+                time.sleep(1)
 
     try:
         call('GET', '/api/books', expected=401, auth=False)
@@ -160,10 +169,16 @@ def main():
             'criteria': {key: [cell['level'] for cell in cells] for key,cells in entry['criteria'].items()},
             'core': [bool(cell) for cell in entry['core']], 'story_unit': bool(entry['story_unit'])}}, ensure_ascii=False), flush=True)
         assert answer['interview']['question'] == 2 and answer['interview']['can_draft']
-        draft = api('POST', path + '/draft')['draft']
-        assert len(draft['chapters']) == 1
-        chapter = api('PUT', path + '/draft/' + draft['id'], {'chapters': draft['chapters']})['chapter_ids'][0]
-        listed = api('GET', f'/api/books/{bid}/chapters?include_material=true&interview_only=true')
+        for _ in range(90):
+            api('GET', f'/api/books/{bid}/topics?editor=true&include_manuscript=true&interview_only=true')
+            listed = api('GET', f'/api/books/{bid}/chapters?include_material=true&interview_only=true')
+            if listed:
+                break
+            time.sleep(1)
+        assert len(listed) == 1, 'Automatic chapter did not appear'
+        chapter = listed[0]['id']
+        assert listed[0]['title'] and listed[0]['content']
+        print('AUTOMATIC_CHAPTER_TITLE_DIRECTORY_OK', flush=True)
         assert listed[0]['topic_id'] == blank_id
         recording = next(n for n in listed[0]['narrations'] if n['has_audio'])
         assert call('GET', f"/api/messages/{recording['id']}/audio") == original
@@ -173,6 +188,13 @@ def main():
         assert call('GET', f"/listen/{share_token}/audio/{recording['id']}", auth=False) == original
         api('DELETE', f'/api/chapters/{chapter}/shares')
         call('GET', '/listen/' + share_token, expected=404, auth=False)
+        editor = api('GET', f'/api/books/{bid}/topics?editor=true&include_manuscript=true&interview_only=true')
+        tid = listed[0]['topic_id']
+        row = api('GET', f'/api/books/{bid}/topics/{tid}/manuscript')
+        organized = api('POST', f'/api/books/{bid}/topics/{tid}/organize', {'revision': row['revision']})
+        assert organized['title'] and organized['blocks']
+        assert organized['revision'] == row['revision'] + 1
+        print('MANUAL_CHAPTER_ORGANIZE_OK', flush=True)
         print('STORY_GATE_STREAM_CHAPTER_AUDIO_SHARE_OK', flush=True)
     finally:
         if account:
@@ -185,3 +207,5 @@ def main():
 
 if __name__ == '__main__':
     main()
+    from deploy.smoke_early_chapter_release import main as early_chapter_smoke
+    early_chapter_smoke()

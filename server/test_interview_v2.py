@@ -7,7 +7,7 @@ from contextlib import closing
 from unittest.mock import AsyncMock, patch
 
 from server.test_app import backend, httpx, wav
-from server import interview, interview_v2
+from server import interview, interview_v2, interview_organizer
 from server.interview_themes import THEMES, QUESTIONS
 
 
@@ -83,6 +83,9 @@ class CurriculumTest(unittest.TestCase):
 
 class ThemeFlowTest(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
+        self.auto = patch.object(interview_organizer, 'schedule', return_value={'organizing': False})
+        self.auto.start()
+        self.addCleanup(self.auto.stop)
         self.client = httpx.AsyncClient(transport=httpx.ASGITransport(app=backend.app), base_url='http://test')
         self.token = (await self.client.post('/api/bootstrap')).json()['token']
         self.client.headers['Authorization'] = f'Bearer {self.token}'
@@ -338,6 +341,94 @@ class ThemeFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(rest['interview']['refresh_message_id'])
         self.assertNotIn('？', rest['text'])
         self.assertEqual(rest['interview']['question'], 2)
+
+    async def test_early_next_chapter_29_30_and_300_character_boundaries(self):
+        for length in (29, 30, 300):
+            with self.subTest(length=length):
+                if length != 29:
+                    self.bid = (await self.client.post('/api/books', json={
+                        'title': '虚构短章', 'author': '测试', 'name': '测试',
+                        'interview': True, 'interview_version': 2})).json()['id']
+                    self.path = f'/api/books/{self.bid}/interview'
+                    opened = (await self.client.post(self.path)).json()
+                    self.sid, self.revision = opened['active_id'], opened['interview']['revision']
+                await self.begin()
+                story = ''.join(chr(0x4e00 + i) for i in range(length))
+                await self.turn(story)
+                with closing(backend.db()) as c:
+                    self.assertEqual(interview_organizer.material(c, self.bid), [])
+                moved = await self.turn('下一章节', action='next')
+                self.assertEqual(moved['interview']['can_draft'], length >= 30)
+                self.assertEqual(moved['interview']['question'], 2)
+                self.assertEqual(self.document()['themes']['t01']['status'], 'pending')
+                backend.authorized(f'Bearer {self.token}')
+                with patch.object(backend, 'llm', AsyncMock(return_value=json.dumps({'title': '短短的回忆', 'body': '按原话保留的短章。'}))):
+                    await interview_organizer.run(self.bid)
+                chapters = (await self.client.get(f'/api/books/{self.bid}/chapters')).json()
+                self.assertEqual(len(chapters), int(length >= 30))
+
+    async def test_background_schedule_deduplicates_and_editor_observes_completion(self):
+        await self.begin()
+        await self.turn(''.join(chr(0x4e00 + i) for i in range(330)), lambda d: result(d, full=True))
+        self.auto.stop()
+        backend.authorized(f'Bearer {self.token}')
+        entered, release = asyncio.Event(), asyncio.Event()
+        async def delayed(*args, **kwargs):
+            entered.set()
+            await release.wait()
+            return json.dumps({'title': '等待后的章名', 'body': '已自动保存的正文'})
+        with patch.object(backend, 'llm', side_effect=delayed) as model:
+            with closing(backend.db()) as c:
+                self.assertTrue(interview_organizer.schedule(c, self.bid)['organizing'])
+                self.assertTrue(interview_organizer.schedule(c, self.bid)['organizing'])
+            await entered.wait()
+            path = f'/api/books/{self.bid}/topics?editor=true&include_manuscript=true&interview_only=true'
+            self.assertTrue((await self.client.get(path)).json()['organizing'])
+            release.set()
+            await interview_organizer._tasks[(backend.ACCOUNT.get(), self.bid)]
+            opened = (await self.client.get(path)).json()
+            self.assertFalse(opened['organizing'])
+            self.assertEqual(opened['topics'][0]['title'], '等待后的章名')
+            self.assertEqual(model.call_count, 1)
+
+    async def test_automatic_chapter_is_idempotent_and_titles_directory(self):
+        await self.begin()
+        original = wav()
+        done = await self.turn(''.join(chr(0x4e00 + i) for i in range(330)), lambda d: result(d, full=True), audio=original)
+        backend.authorized(f'Bearer {self.token}')
+        with patch.object(backend, 'llm', AsyncMock(return_value=json.dumps({'title': '石桥边的清晨', 'body': '这是依据原话整理的虚构正文。'}))):
+            await interview_organizer.run(self.bid)
+            await interview_organizer.run(self.bid)
+        chapters = (await self.client.get(f'/api/books/{self.bid}/chapters?include_material=true&interview_only=true')).json()
+        self.assertEqual(len(chapters), 1)
+        self.assertEqual(chapters[0]['title'], '石桥边的清晨')
+        self.assertEqual({r['id'] for r in chapters[0]['narrations']}, {done['user_id']})
+        opened = (await self.client.get(f'/api/books/{self.bid}/topics?editor=true&include_manuscript=true&interview_only=true')).json()
+        self.assertEqual(opened['topics'][0]['title'], '石桥边的清晨')
+        self.assertIn('虚构正文', opened['manuscript']['blocks'][0]['text'])
+
+    async def test_automatic_failure_keeps_queue_and_correction_cancels_stale_body(self):
+        await self.begin()
+        story = ''.join(chr(0x4e00 + i) for i in range(330))
+        done = await self.turn(story, lambda d: result(d, full=True))
+        backend.authorized(f'Bearer {self.token}')
+        with patch.object(backend, 'llm', AsyncMock(side_effect=RuntimeError('offline'))):
+            await interview_organizer.run(self.bid)
+        with closing(backend.db()) as c:
+            self.assertTrue(interview_organizer.material(c, self.bid))
+        entered, release = asyncio.Event(), asyncio.Event()
+        async def delayed(*args, **kwargs):
+            entered.set()
+            await release.wait()
+            return json.dumps({'title': '不应保存', 'body': '过时正文'})
+        with patch.object(backend, 'llm', side_effect=delayed):
+            task = asyncio.create_task(interview_organizer.run(self.bid))
+            await entered.wait()
+            await self.turn('刚才那段别使用。', lambda d: result(d, material=False,
+                withdrawn=[{'id': done['user_id'], 'quote': story}]))
+            release.set()
+            await task
+        self.assertEqual((await self.client.get(f'/api/books/{self.bid}/chapters')).json(), [])
 
     async def test_one_theme_one_chapter_with_multiple_questions_and_original_audio(self):
         editor_path = f'/api/books/{self.bid}/topics?editor=true&include_manuscript=true&interview_only=true'

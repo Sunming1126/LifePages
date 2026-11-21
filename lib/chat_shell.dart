@@ -1233,7 +1233,11 @@ class _FreeChatPageState extends State<FreeChatPage>
         context: context,
         builder: (sheet) => ChatSheetDialog(
           title: const Text('提前进入下一章节？'),
-          content: const Text('这段素材还未达到成章条件。已记录的内容会保留，暂不生成章节。'),
+          content: Text(
+            (_interview?['characters'] as int? ?? 0) >= 30
+                ? '已记录的有效内容达到 30 字，提前跳过后会按现有内容自动整理成章。'
+                : '已记录的内容会保留。有效内容不足 30 字，暂不生成章节。',
+          ),
           actions: [
             TextButton(
               onPressed: () => Navigator.pop(sheet, false),
@@ -1258,7 +1262,7 @@ class _FreeChatPageState extends State<FreeChatPage>
       content: Text(
         _interview?['can_advance'] == true
             ? '这段素材已经达到成章条件。'
-            : '成章至少需要 ${_interview?['minimum_characters'] ?? 301} 字，并有完整的故事经过或生活细节。',
+            : '成章至少需要 ${_interview?['minimum_characters'] ?? 301} 字，并有完整的故事经过或生活细节。提前进入下一章节时，有效内容达到 30 字也会按现有内容整理。',
       ),
       actions: [
         TextButton(

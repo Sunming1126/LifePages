@@ -17,7 +17,7 @@ router = APIRouter(prefix='/api/books/{bid}/interview')
 
 
 @router.post('')
-def open_interview(bid: str, request: Request):
+async def open_interview(bid: str, request: Request):
     backend.require(request)
     with closing(backend.db()) as c, c:
         book_api.initialize(c)
@@ -26,6 +26,9 @@ def open_interview(bid: str, request: Request):
         state = interview.start(c, bid)
         sid = state['session_id']
         c.execute('UPDATE book_state SET active_id=? WHERE singleton=1', (bid,))
+        if state['version'] == 2:
+            from server import interview_organizer
+            interview_organizer.schedule(c, bid)
         return {
             'active_id': sid, 'messages': interview.history(c, bid),
             'interview': interview.public_state(c, state), 'deferred_voice_upload': True,
