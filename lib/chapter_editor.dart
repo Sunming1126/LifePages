@@ -41,13 +41,15 @@ class ChapterOpening {
     this._topics,
     this._manuscript,
     this._draft,
-    this._combined,
-  );
+    this._combined, [
+    this.organizing = false,
+  ]);
 
   final List<_Row> _topics;
   final _Row _manuscript;
   final _Row? _draft;
   final bool _combined;
+  final bool organizing;
 
   static Future<ChapterOpening> load(
     Api client,
@@ -72,7 +74,9 @@ class ChapterOpening {
     ).query;
     final data = await client.call('GET', '$path?$query') as Map;
     final topics = _readRows(data['topics']);
-    if (topics.isEmpty) throw StateError('请先在访谈中整理并保存书稿');
+    if (topics.isEmpty) {
+      throw StateError('请先在访谈中整理并保存书稿');
+    }
     final initial =
         topics.where((row) => row['id'] == last).firstOrNull ??
         topics.where((row) => row['id'] == data['active_id']).firstOrNull ??
@@ -89,7 +93,13 @@ class ChapterOpening {
           (dir) => _readDraft(_draftFile(dir, bookId, tid)),
         );
     final result = await Future.wait<_Row?>([remote, local]);
-    return ChapterOpening._(topics, result[0]!, result[1], combined != null);
+    return ChapterOpening._(
+      topics,
+      result[0]!,
+      result[1],
+      combined != null,
+      data['organizing'] == true,
+    );
   }
 }
 
@@ -145,6 +155,8 @@ class _ChapterEditorState extends State<ChapterEditor>
   List<_Row> _topics = [], _blocks = [];
   _Row? _topic;
   String? _selected, _loadError;
+  Timer? _organizationPoll;
+  bool _organizing = false;
   String? _insertId, _insertFingerprint;
   Object? _saveError;
   bool _working = false, _dirty = false, _saving = false;
@@ -197,6 +209,7 @@ class _ChapterEditorState extends State<ChapterEditor>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _organizationPoll?.cancel();
     _localTimer?.cancel();
     _saveTimer?.cancel();
     _recordLimit?.cancel();
@@ -252,6 +265,7 @@ class _ChapterEditorState extends State<ChapterEditor>
   }
 
   void _applyOpening(ChapterOpening opening) {
+    _organizing = opening.organizing;
     _topics = opening._topics.map(_Row.from).toList();
     _supportsCombinedLoad = opening._combined;
     _applyTopic(opening._manuscript, opening._draft);
@@ -277,6 +291,16 @@ class _ChapterEditorState extends State<ChapterEditor>
                 interview: widget.interview,
               ));
       if (!mounted) return;
+      _organizationPoll?.cancel();
+      setState(() => _organizing = opening.organizing);
+      if (opening.organizing) {
+        _organizationPoll = Timer(const Duration(seconds: 2), () {
+          if (mounted) unawaited(_load());
+        });
+      }
+      if (!cold) {
+        setState(() => _topics = opening._topics.map(_Row.from).toList());
+      }
       if (cold) {
         _applyOpening(opening);
       } else if (_generation == generation &&
@@ -351,6 +375,7 @@ class _ChapterEditorState extends State<ChapterEditor>
               }
             : null,
         _supportsCombinedLoad,
+        _organizing,
       ),
     );
   }
@@ -720,6 +745,19 @@ class _ChapterEditorState extends State<ChapterEditor>
     widget.onChaptersChanged?.call();
   });
 
+  Future<void> _organize() => _work(() async {
+    if (!await _flush() || !mounted) return;
+    final updated = await _withProgress(
+      _EditorAction.draft,
+      () => _client.call('POST', '$_topicPath/organize', {
+        'revision': _topic!['revision'],
+      }),
+    );
+    if (!mounted) return;
+    _applyTopic(_Row.from(updated as Map), null);
+    widget.onChaptersChanged?.call();
+  });
+
   Future<void> _aiText() => _work(() async {
     final request = await showChatSheet<String>(
       context: context,
@@ -1064,6 +1102,11 @@ class _ChapterEditorState extends State<ChapterEditor>
                   ),
                 ),
         ),
+        if (_organizing)
+          const Padding(
+            padding: EdgeInsets.symmetric(vertical: 8),
+            child: Text('正在自动整理已完成的章节，完成后会显示在章节目录中。'),
+          ),
         if (_blocks.isEmpty)
           Card(
             color: Colors.white,
@@ -1257,26 +1300,28 @@ class _ChapterEditorState extends State<ChapterEditor>
                 ),
               ],
             ),
+            if (_topic?['draft_id'] != null)
+              TextButton(
+                onPressed: enabled ? _draft : null,
+                child: const Text('查看本章草稿'),
+              ),
             const SizedBox(height: 8),
             Row(
               children: [
-                if (!widget.interview || _topic?['draft_id'] != null)
-                  Expanded(
-                    child: OutlinedButton.icon(
-                      onPressed: enabled ? _draft : null,
-                      style: OutlinedButton.styleFrom(
-                        minimumSize: const Size(0, 48),
-                        padding: const EdgeInsets.symmetric(horizontal: 8),
-                      ),
-                      icon: _actionIcon(
-                        _EditorAction.draft,
-                        Icons.auto_awesome_outlined,
-                      ),
-                      label: Text(
-                        _topic?['draft_id'] != null ? '查看本章草稿' : '整理本章内容',
-                      ),
+                Expanded(
+                  child: OutlinedButton.icon(
+                    onPressed: enabled ? _organize : null,
+                    style: OutlinedButton.styleFrom(
+                      minimumSize: const Size(0, 48),
+                      padding: const EdgeInsets.symmetric(horizontal: 8),
                     ),
+                    icon: _actionIcon(
+                      _EditorAction.draft,
+                      Icons.auto_awesome_outlined,
+                    ),
+                    label: const Text('整理本章'),
                   ),
+                ),
                 if (supportsNativePhotos) ...[
                   const SizedBox(width: 8),
                   Expanded(

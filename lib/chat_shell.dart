@@ -57,6 +57,7 @@ class _ChatShellState extends State<ChatShell> {
   Api get _api => widget.client ?? api;
   bool _loading = true, _busy = false;
   bool _interviewAvailable = false;
+  bool _themeInterviewAvailable = false;
   int _tab = 0, _shelfEpoch = 0;
   PageBackground _background = PageBackground.paperTone;
   bool _backgroundChosen = false;
@@ -100,6 +101,8 @@ class _ChatShellState extends State<ChatShell> {
 
   void _applyRecords(dynamic state) {
     _interviewAvailable = state['interview_version'] != null;
+    _themeInterviewAvailable =
+        (state['interview_versions'] as List?)?.contains(2) == true;
     final previousInterview = _books
         .where((book) => book['id'] == _activeId)
         .firstOrNull?['interview_version'];
@@ -236,6 +239,7 @@ class _ChatShellState extends State<ChatShell> {
       context,
       _api,
       interview: _interviewAvailable,
+      interviewVersion: _themeInterviewAvailable ? 2 : 1,
     );
     if (mounted && data != null) {
       final fingerprint = jsonEncode(data);
@@ -708,6 +712,8 @@ class _FreeChatPageState extends State<FreeChatPage>
   String get _topicsPath => '/api/books/${widget.personId}/topics';
   String get _interviewPath => '/api/books/${widget.personId}/interview';
   Map<String, dynamic>? _interview;
+  bool get _hiddenThemes => _interview?['version'] == 2;
+  Map<String, dynamic>? _pendingInterviewRefresh;
   List<Map<String, dynamic>> get _visibleOutbox =>
       (widget.interview ? _outbox : _sessionOutbox).toList();
   BookRecord? get _topic =>
@@ -771,7 +777,8 @@ class _FreeChatPageState extends State<FreeChatPage>
   int _warmEpoch = 0;
 
   Future<void> _preconnectReplyAudio() async {
-    if (!Platform.isAndroid ||
+    if ((defaultTargetPlatform != TargetPlatform.android &&
+            defaultTargetPlatform != TargetPlatform.iOS) ||
         !widget.active ||
         !_foreground ||
         !automaticReplyAudio.value ||
@@ -798,7 +805,7 @@ class _FreeChatPageState extends State<FreeChatPage>
 
   void _releaseReplyRoom({Duration grace = Duration.zero}) {
     _warmEpoch++;
-    if (Platform.isAndroid) _replyPlayer.releaseWarm(grace: grace);
+    _replyPlayer.releaseWarm(grace: grace);
   }
 
   void _replyAudioRevoked() {
@@ -823,11 +830,9 @@ class _FreeChatPageState extends State<FreeChatPage>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    if (Platform.isAndroid) {
-      automaticReplyAudio.addListener(_automaticAudioChanged);
-      replyAudioConsentRevision.addListener(_replyAudioRevoked);
-      replyVoiceRevision.addListener(_replyVoiceChanged);
-    }
+    automaticReplyAudio.addListener(_automaticAudioChanged);
+    replyAudioConsentRevision.addListener(_replyAudioRevoked);
+    replyVoiceRevision.addListener(_replyVoiceChanged);
     load();
     unawaited(warmVoice());
     unawaited(_preconnectReplyAudio());
@@ -1035,6 +1040,8 @@ class _FreeChatPageState extends State<FreeChatPage>
     'topics': _topicUpdates.value,
     'messages': messages,
     if (widget.interview) 'interview': _interview,
+    if (_pendingInterviewRefresh != null)
+      'pending_interview_refresh': _pendingInterviewRefresh,
   });
 
   void _readInterview(dynamic state) {
@@ -1071,6 +1078,11 @@ class _FreeChatPageState extends State<FreeChatPage>
         });
         restored = true;
         if (widget.interview) _readInterview(saved['interview']);
+        if (saved['pending_interview_refresh'] is Map) {
+          _pendingInterviewRefresh = Map<String, dynamic>.from(
+            saved['pending_interview_refresh'] as Map,
+          );
+        }
       }
     } catch (_) {
       // Ignore obsolete snapshots and try the server.
@@ -1214,13 +1226,65 @@ class _FreeChatPageState extends State<FreeChatPage>
     });
   }
 
-  Future<void> sendText({String? interviewAction}) async {
-    final text = switch (interviewAction) {
-      'begin' => '开始访谈',
-      'skip' => '跳过这题',
-      'next' => '下一题',
-      _ => input.text.trim(),
-    };
+  Future<void> _nextChapter() async {
+    if (!_canSend) return;
+    if (_interview?['can_advance'] != true) {
+      final skip = await showChatSheet<bool>(
+        context: context,
+        builder: (sheet) => ChatSheetDialog(
+          title: const Text('提前进入下一章节？'),
+          content: Text(
+            (_interview?['characters'] as int? ?? 0) >= 30
+                ? '已记录的有效内容达到 30 字，提前跳过后会按现有内容自动整理成章。'
+                : '已记录的内容会保留。有效内容不足 30 字，暂不生成章节。',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(sheet, false),
+              child: const Text('继续这段'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(sheet, true),
+              child: const Text('保留并跳过'),
+            ),
+          ],
+        ),
+      );
+      if (skip != true || !mounted || !_canSend) return;
+    }
+    await sendText(interviewAction: 'next', nextChapter: true);
+  }
+
+  Future<void> _showInterviewProgress() => showChatSheet<void>(
+    context: context,
+    builder: (sheet) => ChatSheetDialog(
+      title: Text('已记录 ${_interview?['characters'] ?? 0} 字'),
+      content: Text(
+        _interview?['can_advance'] == true
+            ? '这段素材已经达到成章条件。'
+            : '成章至少需要 ${_interview?['minimum_characters'] ?? 301} 字，并有完整的故事经过或生活细节。提前进入下一章节时，有效内容达到 30 字也会按现有内容整理。',
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(sheet),
+          child: const Text('知道了'),
+        ),
+      ],
+    ),
+  );
+
+  Future<void> sendText({
+    String? interviewAction,
+    bool nextChapter = false,
+  }) async {
+    final text = nextChapter
+        ? '下一章节'
+        : switch (interviewAction) {
+            'begin' => '开始访谈',
+            'skip' => '跳过这题',
+            'next' => '下一题',
+            _ => input.text.trim(),
+          };
     if (text.isEmpty || !_canSubmitText) {
       return;
     }
@@ -1607,7 +1671,7 @@ class _FreeChatPageState extends State<FreeChatPage>
     }
     final epoch = _replyEpoch;
     try {
-      if (Platform.isAndroid && !automaticReplyAudio.value) return false;
+      if (!automaticReplyAudio.value) return false;
       final allowed = await _ensureReplyAudio(prompt: Platform.isAndroid);
       return allowed &&
           mounted &&
@@ -1721,7 +1785,7 @@ class _FreeChatPageState extends State<FreeChatPage>
     }
     final epoch = ++_replyEpoch;
     try {
-      if (!requested && Platform.isAndroid && !automaticReplyAudio.value) {
+      if (!requested && !automaticReplyAudio.value) {
         return;
       }
       if (!await _ensureReplyAudio(prompt: requested)) return;
@@ -2503,15 +2567,40 @@ class _FreeChatPageState extends State<FreeChatPage>
       _refreshingReply = id;
     });
     try {
-      if (!opening && !await consent(context, widget.personId)) return;
+      if ((!opening || _hiddenThemes) &&
+          !await consent(context, widget.personId)) {
+        return;
+      }
       if (!mounted) return;
       if (_speakingReply == id) unawaited(_stopReply());
+      if (_hiddenThemes &&
+          (_pendingInterviewRefresh?['message_id'] != id ||
+              _pendingInterviewRefresh?['text'] != text)) {
+        _pendingInterviewRefresh = {
+          'message_id': id,
+          'text': text,
+          'revision': _interview!['revision'],
+          'request_id': const Uuid().v4().replaceAll('-', ''),
+        };
+        await _saveOpening();
+      }
       final result = await chatApi.call(
         'POST',
-        '$_topicsPath/$session/messages/$id/refresh',
-        {'text': text},
+        _hiddenThemes
+            ? '$_interviewPath/messages/$id/refresh'
+            : '$_topicsPath/$session/messages/$id/refresh',
+        _hiddenThemes ? _pendingInterviewRefresh : {'text': text},
       );
       if (!mounted || session != _session) return;
+      if (_hiddenThemes) {
+        _pendingInterviewRefresh = null;
+        final progress = result['interview'] as Map;
+        if ((progress['revision'] as int) <
+            (_interview?['revision'] as int? ?? -1)) {
+          return;
+        }
+        _readInterview(progress);
+      }
       final replacement = result['text'] as String;
       setState(() {
         _chapterHistory[session] = [
@@ -2522,7 +2611,12 @@ class _FreeChatPageState extends State<FreeChatPage>
               row,
         ];
       });
+      await _saveOpening();
     } catch (error) {
+      if (_hiddenThemes && error is ApiFailure && error.status == 409) {
+        _pendingInterviewRefresh = null;
+        if (mounted) await load();
+      }
       if (mounted) {
         showError(
           context,
@@ -2589,6 +2683,14 @@ class _FreeChatPageState extends State<FreeChatPage>
         questionCount != null &&
         question > 0 &&
         question <= questionCount;
+    final characters = (_interview?['characters'] as int?) ?? 0;
+    final minimum = (_interview?['minimum_characters'] as int?) ?? 301;
+    final ready = _interview?['can_advance'] == true;
+    final progress = ready
+        ? 1.0
+        : (characters / (minimum > 0 ? minimum : 301))
+              .clamp(0.0, .95)
+              .toDouble();
     final canSkip =
         _canSend && !_sessionOutbox.any((turn) => !_onlyOriginal(turn));
     return Theme(
@@ -2604,67 +2706,119 @@ class _FreeChatPageState extends State<FreeChatPage>
                   padding: const EdgeInsets.fromLTRB(16, 0, 16, 4),
                   child: SizedBox(
                     height: 48,
-                    child: Stack(
-                      alignment: Alignment.center,
+                    child: Row(
                       children: [
-                        Padding(
-                          padding: const EdgeInsets.symmetric(horizontal: 54),
-                          child: Column(
-                            mainAxisAlignment: MainAxisAlignment.center,
-                            children: [
-                              Text(
-                                widget.bookTitle,
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: const TextStyle(
-                                  fontSize: 21,
-                                  fontWeight: FontWeight.w900,
-                                ),
-                              ),
-                              if (widget.interview && question != null)
-                                Text(
-                                  question == 0
-                                      ? '自我介绍'
-                                      : answering
-                                      ? '访谈 $question / $questionCount'
-                                      : '访谈已完成',
-                                  style: Theme.of(
-                                    context,
-                                  ).textTheme.labelMedium,
+                        SizedBox(
+                          width: 92,
+                          child: answering && widget.interview
+                              ? Row(
+                                  children: [
+                                    SizedBox(
+                                      width: 48,
+                                      height: 48,
+                                      child: OutlinedButton(
+                                        key: const ValueKey(
+                                          'next-chapter-button',
+                                        ),
+                                        onPressed: canSkip
+                                            ? _nextChapter
+                                            : null,
+                                        style: OutlinedButton.styleFrom(
+                                          padding: const EdgeInsets.all(5),
+                                          foregroundColor: chatAccent,
+                                          shape: RoundedRectangleBorder(
+                                            borderRadius: BorderRadius.circular(
+                                              8,
+                                            ),
+                                          ),
+                                        ),
+                                        child: const Text(
+                                          '下一\n章节',
+                                          semanticsLabel: '下一章节',
+                                          textAlign: TextAlign.center,
+                                          style: TextStyle(
+                                            fontSize: 12,
+                                            height: 1.1,
+                                            fontWeight: FontWeight.w700,
+                                          ),
+                                        ),
+                                      ),
+                                    ),
+                                    const SizedBox(width: 6),
+                                    SizedBox(
+                                      width: 36,
+                                      height: 36,
+                                      child: IconButton(
+                                        key: const ValueKey(
+                                          'interview-progress-ring',
+                                        ),
+                                        tooltip: '查看已记录字数',
+                                        padding: EdgeInsets.zero,
+                                        onPressed: _showInterviewProgress,
+                                        icon: SizedBox(
+                                          width: 32,
+                                          height: 32,
+                                          child: Stack(
+                                            alignment: Alignment.center,
+                                            children: [
+                                              CircularProgressIndicator(
+                                                value: progress,
+                                                strokeWidth: 3,
+                                                color: chatAccent,
+                                                backgroundColor: chatAccent
+                                                    .withValues(alpha: .14),
+                                              ),
+                                              if (ready)
+                                                const Icon(
+                                                  Icons.check_rounded,
+                                                  size: 16,
+                                                )
+                                              else
+                                                Text(
+                                                  '${(progress * 100).floor()}%',
+                                                  style: const TextStyle(
+                                                    fontSize: 9,
+                                                  ),
+                                                ),
+                                            ],
+                                          ),
+                                        ),
+                                      ),
+                                    ),
+                                  ],
                                 )
-                              else if (_topic case final topic?)
-                                Text(
-                                  "第 ${topic['number']} 章 · ${topic['title']}",
-                                  maxLines: 1,
-                                  overflow: TextOverflow.ellipsis,
-                                  style: Theme.of(
-                                    context,
-                                  ).textTheme.labelMedium,
-                                ),
-                            ],
+                              : null,
+                        ),
+                        Expanded(
+                          child: Text(
+                            widget.bookTitle,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            textAlign: TextAlign.center,
+                            style: const TextStyle(
+                              fontSize: 21,
+                              fontWeight: FontWeight.w900,
+                            ),
                           ),
                         ),
-                        Row(
-                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                          children: [
-                            const SizedBox(width: 48),
-                            GlassIconButton(
+                        SizedBox(
+                          width: 92,
+                          child: Align(
+                            alignment: Alignment.centerRight,
+                            child: GlassIconButton(
                               key: const ValueKey('assistant-settings-button'),
                               size: 48,
                               iconSize: 26,
                               useOwnLayer: true,
                               glowColor: chatAccent.withValues(alpha: .18),
                               onPressed:
-                                  widget.onChooseBook ??
-                                  (widget.interview
-                                      ? _openChapterOutbox
-                                      : _openTopics),
+                                  widget.onChooseBook ?? _openChapterOutbox,
                               icon: const Icon(
                                 Icons.tune_rounded,
                                 semanticLabel: '聊天设置',
                               ),
                             ),
-                          ],
+                          ),
                         ),
                       ],
                     ),
@@ -2684,21 +2838,6 @@ class _FreeChatPageState extends State<FreeChatPage>
                                 : null,
                             child: const Text('开始聊故事'),
                           ),
-                        if (answering)
-                          TextButton(
-                            onPressed: canSkip
-                                ? () => sendText(interviewAction: 'skip')
-                                : null,
-                            child: const Text('跳过这题'),
-                          ),
-                        if (answering &&
-                            _interview?['minimum_characters'] != null)
-                          TextButton(
-                            onPressed: canSkip
-                                ? () => sendText(interviewAction: 'next')
-                                : null,
-                            child: const Text('下一题'),
-                          ),
                         if (_interview?['can_draft'] == true)
                           TextButton(
                             onPressed: _canSend ? _organizeInterview : null,
@@ -2707,12 +2846,6 @@ class _FreeChatPageState extends State<FreeChatPage>
                       ],
                     ),
                   ),
-                if (widget.interview && answering)
-                  if (_interview?['characters'] case final int characters)
-                    Text(
-                      '本题已记录 $characters 字',
-                      style: Theme.of(context).textTheme.labelMedium,
-                    ),
                 if (_offline)
                   TextButton.icon(
                     onPressed: load,
@@ -2964,7 +3097,12 @@ class _FreeChatPageState extends State<FreeChatPage>
       playing: canPlay && _speakingReply == id,
       refreshing: _refreshingReply != null && _refreshingReply == id,
       canRefresh: !_chatBusy,
-      onRefresh: !widget.interview && assistant && id != null && text.isNotEmpty
+      onRefresh:
+          (!widget.interview ||
+                  (_hiddenThemes && _interview?['refresh_message_id'] == id)) &&
+              assistant &&
+              id != null &&
+              text.isNotEmpty
           ? () => unawaited(_refreshQuestion(id, text, opening: opening))
           : null,
       onPlay: canPlay

@@ -31,10 +31,10 @@ final api = Api();
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  unawaited(restoreAutomaticReplyAudio());
   if (Platform.isAndroid) {
     runApp(const LifePages());
     unawaited(restoreReadingScale());
-    unawaited(restoreAutomaticReplyAudio());
     WidgetsBinding.instance.addPostFrameCallback((_) {
       unawaited(LiquidGlassWidgets.initialize(enablePerformanceMonitor: false));
     });
@@ -106,11 +106,16 @@ class ApiFailure implements Exception {
 typedef PendingVoiceUpload = ({String path, bool blocked});
 
 class Api {
-  Api({http.Client? client, ReadCache? cache, bool? offlineReads})
-    : _client = client ?? http.Client(),
-      _cache = cache ?? ReadCache(getApplicationSupportDirectory),
-      offlineReads = offlineReads ?? Platform.isAndroid;
+  Api({
+    http.Client? client,
+    ReadCache? cache,
+    bool? offlineReads,
+    this.turnIdleTimeout = const Duration(seconds: 50),
+  }) : _client = client ?? http.Client(),
+       _cache = cache ?? ReadCache(getApplicationSupportDirectory),
+       offlineReads = offlineReads ?? Platform.isAndroid;
   final http.Client _client;
+  final Duration turnIdleTimeout;
   final ReadCache _cache;
   final bool offlineReads;
   static const _voiceUploads = MethodChannel('life_pages/voice_uploads');
@@ -188,7 +193,10 @@ class Api {
       ..body = jsonEncode({...body, 'speak': speak});
     final response = await _client
         .send(request)
-        .timeout(const Duration(seconds: 50));
+        .timeout(
+          const Duration(seconds: 50),
+          onTimeout: () => throw const ApiFailure(504, '回复连接超时，内容已保留，请点击重试。'),
+        );
     if (response.statusCode != 200) {
       final buffered = await http.Response.fromStream(
         response,
@@ -206,7 +214,12 @@ class Api {
         in response.stream
             .transform(utf8.decoder)
             .transform(const LineSplitter())
-            .timeout(const Duration(seconds: 50))) {
+            .timeout(
+              turnIdleTimeout,
+              onTimeout: (sink) {
+                sink.addError(const ApiFailure(504, '回复连接中断，内容已保留，请点击重试。'));
+              },
+            )) {
       if (line.isNotEmpty) yield jsonDecode(line) as Map<String, dynamic>;
     }
   }

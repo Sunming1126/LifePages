@@ -107,7 +107,7 @@ class InterviewTests(unittest.IsolatedAsyncioTestCase):
             payload.update(interview_action=action, interview_revision=self.revision)
         path = f'/api/people/{self.bid}/turns'
 
-        async def output(_, context, *, json_mode):
+        async def output(_, context, *, json_mode, **kwargs):
             self.assertTrue(json_mode)
             data = json.loads(context)
             return json.dumps(model(data), ensure_ascii=False)
@@ -126,6 +126,40 @@ class InterviewTests(unittest.IsolatedAsyncioTestCase):
         self.revision = data['interview']['revision']
         return data, payload['request_id']
 
+    async def test_permission_question_is_regenerated_before_delivery(self):
+        await self.open()
+        await self.turn('开始', action='begin')
+        calls = 0
+        def model(data):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return dict(score([None] * 3, [ref(data['turn'], '厨房的灶台')], question=2),
+                            followup='能讲一回在灶台那里发生的事吗？')
+            self.assertIn('灶台', json.dumps(data, ensure_ascii=False))
+            return {'followup': '您小时候在灶台边通常做些什么？'}
+        reply, _ = await self.turn('最先想起厨房的灶台', model)
+        self.assertEqual(calls, 2)
+        self.assertEqual(reply['text'], '您小时候在灶台边通常做些什么？')
+
+    async def test_agreement_keeps_context_and_asks_generated_question(self):
+        await self.open()
+        await self.turn('开始', action='begin')
+        first, _ = await self.turn('最先想起四合院里厨房的灶台', lambda data: dict(
+            score([None] * 3, [ref(data['turn'], '四合院里厨房的灶台')]),
+            followup='您小时候在灶台边通常做些什么？'))
+        self.assertEqual(first['text'], '您小时候在灶台边通常做些什么？')
+
+        def agree(data):
+            self.assertIn('灶台', json.dumps(data, ensure_ascii=False))
+            return dict(score([None] * 3, intent='off_topic'),
+                        followup='在那座灶台边，您记得最清楚的一次做饭是什么情形？')
+        reply, _ = await self.turn('可以啊', agree)
+        self.assertIn('灶台', reply['text'])
+        self.assertTrue(reply['text'].endswith('？'))
+        self.assertNotIn('接着聊', reply['text'])
+        self.assertEqual(reply['interview']['characters'], first['interview']['characters'])
+
     async def test_scoped_memory_and_strict_threshold_block_repeated_and_compound_replies(self):
         first = await self.open()
         self.assertEqual(first['messages'][0]['text'], interview.INTRO)
@@ -140,24 +174,28 @@ class InterviewTests(unittest.IsolatedAsyncioTestCase):
                            [ref(data['turn'], text)], question=1)
             # Even if a provider invents a second question, it cannot reach the user.
             result['reply'] = '您在那里常做什么？' + V1[1].prompt
+            result['followup'] = '那回在井台边捏泥人时，您是怎么做的？'
             return result
 
         reply, _ = await self.turn(text, short)
         self.assertEqual(reply['interview']['question'], 1)
         self.assertGreater(reply['interview']['characters'], 0)
         self.assertFalse(reply['interview']['can_draft'])
-        self.assertEqual(reply['text'], DEPTH[0][1][2])
+        self.assertEqual(reply['text'], '那回在井台边捏泥人时，您是怎么做的？')
         self.assertNotIn(V1[1].prompt, reply['text'])
         self.assertEqual((await self.open())['interview'], reply['interview'])
 
         def off_topic(data):
             self.assertTrue(all(data['known'][:2]))
-            return score([None] * 3, question=2, intent='off_topic')
+            return dict(score([None] * 3, question=2, intent='off_topic'),
+                        followup='您当时捏泥人的泥巴是从哪儿找来的？')
 
         unrelated, _ = await self.turn('我已经买好了火车票。' * 100, off_topic)
         self.assertEqual(unrelated['interview']['characters'], reply['interview']['characters'])
         self.assertFalse(unrelated['interview']['can_draft'])
-        again, _ = await self.turn(text, lambda data: score([None] * 3, [ref(data['turn'], text)], question=2))
+        again, _ = await self.turn(text, lambda data: dict(
+            score([None] * 3, [ref(data['turn'], text)], question=2),
+            followup='那回捏泥人时，您是怎样把泥人的模样捏出来的？'))
         self.assertEqual(again['interview']['characters'], reply['interview']['characters'])
         self.assertNotEqual(again['text'], reply['text'])
 
@@ -205,7 +243,9 @@ class InterviewTests(unittest.IsolatedAsyncioTestCase):
         path = self.path + '/draft'
         self.assertEqual((await self.client.post(path)).status_code, 409)
         await self.turn('下一题')
-        await self.turn('和小树一起去看戏。', lambda data: score([None] * 3, [ref(data['turn'], '和小树一起去看戏')]))
+        await self.turn('和小树一起去看戏。', lambda data: dict(
+            score([None] * 3, [ref(data['turn'], '和小树一起去看戏')]),
+            followup='您和小树那天去看戏，路上发生了什么？'))
         await self.turn('跳过这题', action='skip')
         chapter_path = f'/api/books/{self.bid}/chapters?include_material=true&interview_only=true'
 
@@ -259,7 +299,10 @@ class InterviewTests(unittest.IsolatedAsyncioTestCase):
         opened = await self.open()
         self.assertNotEqual(legacy, self.session)
         self.assertIn(answer.json()['user_id'], {m['id'] for m in opened['messages']})
-        self.assertEqual((await self.client.get(chapter_route + '?editor=true&interview_only=true')).json()['topics'], [])
+        workspace = (await self.client.get(chapter_route + '?editor=true&interview_only=true')).json()['topics']
+        self.assertEqual(len(workspace), 1)
+        self.assertIsNone(workspace[0]['chapter_id'])
+        self.assertEqual(workspace[0]['blocks'], [])
         await self.client.delete(f'/api/books/{self.bid}')
         backend.authorized(f'Bearer {self.token}')
         with closing(backend.db()) as connection, connection:

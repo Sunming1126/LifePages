@@ -18,10 +18,15 @@ Future<BookRecord?> newBookSheet(
   BuildContext context,
   Api client, {
   bool interview = false,
+  int interviewVersion = 1,
 }) async {
   final form = GlobalKey<FormState>();
   final data = <String, dynamic>{
-    if (interview) 'interview': true else 'template_id': 'life',
+    if (interview) ...{
+      'interview': true,
+      if (interviewVersion == 2) 'interview_version': 2,
+    } else
+      'template_id': 'life',
   };
   List? templates;
   var templateName = '完整人生（26 章）';
@@ -220,10 +225,7 @@ class _BookshelfState extends State<Bookshelf> {
   bool _hasBook(String id) => widget.books.any((book) => book['id'] == id);
 
   Set<String> _priorityBooks(Bookshelf shelf) {
-    final ids = shelf.books
-        .where((book) => book['interview_version'] == null)
-        .map((book) => book['id'] as String)
-        .toSet();
+    final ids = shelf.books.map((book) => book['id'] as String).toSet();
     final active = shelf.activeId;
     return {
       if (active != null && ids.remove(active)) active,
@@ -255,6 +257,11 @@ class _BookshelfState extends State<Bookshelf> {
               widget.client,
               id,
               documentsDirectory: widget.documentsDirectory,
+              interview:
+                  widget.books.firstWhere(
+                    (book) => book['id'] == id,
+                  )['interview_version'] !=
+                  null,
             )
             .then((opening) {
               if (mounted &&
@@ -274,13 +281,11 @@ class _BookshelfState extends State<Bookshelf> {
   Future<void> _openEditor(BuildContext context, BookRecord book) async {
     final id = book['id'] as String;
     final interview = book['interview_version'] != null;
-    if (interview && book['chapter_count'] == 0 && widget.onContinue != null) {
-      widget.onContinue!(id);
-      return;
-    }
     await Navigator.of(context).push(
-      MaterialPageRoute<void>(
-        builder: (_) => ChapterEditor(
+      PageRouteBuilder<void>(
+        transitionDuration: Duration.zero,
+        reverseTransitionDuration: Duration.zero,
+        pageBuilder: (_, _, _) => ChapterEditor(
           bookId: id,
           name: book['name'] as String,
           title: book['title'] as String,
@@ -288,8 +293,8 @@ class _BookshelfState extends State<Bookshelf> {
           client: widget.client,
           interview: interview,
           documentsDirectory: widget.documentsDirectory,
-          initialOpening: interview ? null : _openings[id],
-          loadOpening: interview ? null : () => _requestOpening(id),
+          initialOpening: _openings[id],
+          loadOpening: () => _requestOpening(id),
           onOpeningChanged: (opening) {
             if (mounted && _hasBook(id)) _rememberOpening(id, opening);
           },
@@ -442,7 +447,7 @@ class _BookshelfState extends State<Bookshelf> {
       ),
       clipBehavior: Clip.antiAlias,
       child: InkWell(
-        onTapDown: interview ? null : (_) => _warm(book['id'] as String),
+        onTapDown: (_) => _warm(book['id'] as String),
         onTap: () => _openEditor(context, book),
         child: Padding(
           padding: const EdgeInsets.all(14),

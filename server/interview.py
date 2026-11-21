@@ -64,8 +64,12 @@ def start(c, bid):
     c.execute('INSERT INTO chat_sessions(id,person_id,title) VALUES(?,?,?)', (sid, bid, '回忆录访谈'))
     c.execute("INSERT INTO messages(id,person_id,role,text) VALUES(?,?,'assistant',?)", (mid, bid, INTRO))
     chat_sessions.bind(c, bid, sid, mid)
+    from server import interview_v2
+    version = interview_v2.version(c, bid)
     c.execute('INSERT INTO book_interviews(book_id,session_id,version,first_message) VALUES(?,?,?,?)',
-              (bid, sid, CURRENT_VERSION, mid))
+              (bid, sid, version, mid))
+    if version == 2:
+        interview_v2.initialize(c, bid)
     return find(c, bid)
 
 
@@ -108,6 +112,10 @@ def overlaps(left, right):
 
 
 def available_excerpts(c, state, answers):
+    if state['version'] == 2:
+        from server import interview_v2
+        yield from interview_v2.available_excerpts(c, state)
+        return
     bid, current = state['book_id'], state['question']
     total = len(BANKS[state['version']])
     legacy = {r[0] for r in c.execute('''SELECT s.message_id FROM chapter_sources s
@@ -134,6 +142,9 @@ def available_excerpts(c, state, answers):
 
 
 def public_state(c, state):
+    if state['version'] == 2:
+        from server import interview_v2
+        return interview_v2.public_state(c, state)
     answers = answers_for(c, state['book_id'])
     number = state['question']
     total = len(BANKS[state['version']])
@@ -141,6 +152,8 @@ def public_state(c, state):
         'question': number, 'total': total, 'revision': state['revision'],
         'characters': character_count(c, state, answers.get(number)) if 1 <= number <= total else 0,
         'minimum_characters': MINIMUM_CHARACTERS,
+        'can_advance': bool(1 <= number <= total and passed(answers.get(number))
+                            and character_count(c, state, answers.get(number)) >= MINIMUM_CHARACTERS),
         'can_draft': (next(available_excerpts(c, state, answers), None) is not None
                       or bool(c.execute('SELECT 1 FROM interview_drafts WHERE book_id=? AND saved=0',
                                         (state['book_id'],)).fetchone())),
@@ -169,9 +182,13 @@ INTERVIEW_PROMPT = (
     '从 options 编号中选择一个与当前叙述有关且用户尚未回答的追问。'
     '例如已经说了去纺织厂挡车，就既不要再次问做的是什么工作，也不要换地名再问同一件事。'
     '如果没有合适的新追问，question 设为 null。用户在闲聊或没提供这个话题的有效素材时，'
-    'intent 可设为 off_topic。禁止撰写任何回复文字、额外追问、下一题或过题判断。'
+    'intent 可设为 off_topic，但“可以啊”“好”“您问吧”是同意继续，不是离题。'
+    '另用 followup 根据完整对话生成一个具体、尚未回答的开放式追问，优先接住用户提到的人、物、动作。'
+    '用户只答应继续时，从前文已经提到的场景里选择一个容易回答的新细节，直接询问经历。'
+    '不要复制旧问题，不要问“能讲一回吗”，不使用固定示例或套话。'
+    '禁止只回复“继续聊”“接着说”这类催聊话，禁止把多个问题拼在一起，不能编造经历。'
     '输出 JSON {"intent":"answer|off_topic|ready","criteria":[[{"id":"用户消息ID","quote":"逐字原文"}],null],'
-    '"material":[{"id":"用户消息ID","quote":"逐字原文"}],"withdrawn":[],"question":null}。'
+    '"material":[{"id":"用户消息ID","quote":"逐字原文"}],"withdrawn":[],"question":null,"followup":"一个具体问题？"}。'
     'criteria 元素数量与输入准则严格一致，新证据缺失用 null，intro 时 criteria=[]。'
     '只有自我介绍时可返回 ready。用户介绍完、只愿提供部分信息或要求开始时就可以 ready。'
 )
@@ -265,6 +282,9 @@ def requested_action(text):
 
 
 async def respond(c, state, mid, text, action, llm):
+    if state['version'] == 2:
+        from server import interview_v2
+        return await interview_v2.respond(c, state, mid, text, action, llm)
     bid, number = state['book_id'], state['question']
     bank = BANKS[state['version']]
     last = len(bank)
@@ -293,6 +313,13 @@ async def respond(c, state, mid, text, action, llm):
         'earlier_material': interview_memory.compact(old[2]) if old else [],
         'history': interview_memory.recent(rows, mid),
     }
+    from server.interview_v2 import AGREEMENT, generate_followup
+    if current and AGREEMENT.fullmatch(text.strip()):
+        shown = [{'text': row['text']} for row in rows if row['role'] == 'assistant']
+        question = await generate_followup(context, shown, llm)
+        if not question:
+            raise HTTPException(502, 'AI 没有提出有效的新问题，请重试')
+        return question, number, state['attempts'] + 1, {}
     error = 'AI 未能完成本轮判断，请重试'
     result = decode(await llm(INTERVIEW_PROMPT, json.dumps(context, ensure_ascii=False), json_mode=True), error)
     try:
@@ -315,15 +342,22 @@ async def respond(c, state, mid, text, action, llm):
         return advance(bank, number, '好，这一段先记到这里。', updates)
     if passed(answer) and total >= MINIMUM_CHARACTERS:
         return advance(bank, number, '这段故事已经可以整理进书稿了。', updates)
-    if intent == 'off_topic':
-        return '我们可以接着聊刚才这段往事。', number, state['attempts'] + 1, updates
 
     remaining = followups(number, answer, rows)
     preferred = result.get('question')
     question = remaining.get(preferred) if type(preferred) is int else None
     if question is None and type(preferred) is int and remaining:
         question = next(iter(remaining.values()))
-    reply = question or '您可以接着说这一段，想到什么就从哪里讲起。'
+    from server.interview_v2 import valid_question
+    shown = [{'text': row['text']} for row in rows if row['role'] == 'assistant']
+    generated = valid_question(result.get('followup'), shown)
+    reply = generated or valid_question(question, shown)
+    if not reply:
+        # Never commit an empty invitation when the fixed backup pool is exhausted.
+        from server.interview_v2 import generate_followup
+        reply = await generate_followup(context, shown, llm)
+    if not reply:
+        raise HTTPException(502, 'AI 没有提出有效的新问题，请重试')
     return reply, number, state['attempts'] + 1, updates
 
 
@@ -334,6 +368,9 @@ def advance(bank, number, statement, updates):
 
 
 def commit(c, state, mid, number, attempts, updates):
+    if state['version'] == 2:
+        from server import interview_v2
+        return interview_v2.commit(c, state, mid, number, attempts, updates)
     bid = state['book_id']
     intro_end = state['intro_end']
     if state['question'] == 0 and number != 0:

@@ -246,12 +246,21 @@ def llm_rate_limit(response):
     return HTTPException(429, 'AI 回复额度暂时用完，请等额度恢复后点击重试。')
 
 
-async def llm(system, context, *, json_mode=False):
+async def llm(system, context, *, json_mode=False, max_tokens=4096, thinking=None):
     key, base, model = read_llm_config()
     body = {'model': model, 'messages': [{'role': 'system', 'content': system},
-            {'role': 'user', 'content': context}], 'max_tokens': 4096}
+            {'role': 'user', 'content': context}], 'max_tokens': max_tokens}
     if json_mode and model == 'qwen3.7-flash' and urlparse(base).hostname == 'dashscope.aliyuncs.com':
         body.update(enable_thinking=False, response_format={'type': 'json_object'})
+    # Opt-in for the v2 interview only. Ark's DeepSeek V4.1 defaults to
+    # reasoning, which shares max_tokens with the structured final answer.
+    # Do not send provider-specific controls to unknown models/endpoints.
+    if (thinking is False and urlparse(base).hostname == 'ark.cn-beijing.volces.com'
+            and urlparse(base).path.rstrip('/') in ('/api/coding/v3', '/api/plan/v3', '/api/v3')
+            and model.lower() in ('deepseek-v4.1-flash', 'deepseek-v4.1-flash-economy')):
+        body['thinking'] = {'type': 'disabled'}
+        if json_mode:
+            body['response_format'] = {'type': 'json_object'}
     try:
         async with httpx.AsyncClient(timeout=120) as client:
             response = await client.post(base + '/chat/completions', headers={'Authorization': f'Bearer {key}'}, json=body)
@@ -687,16 +696,24 @@ async def stream_deferred_voice_turn(pid: str, turn: DeferredVoiceTurn, request:
 
 
 def stream_turn_response(pid, turn, *, deferred_hash=None):
+    from starlette.background import BackgroundTask
+    async def organize_after_reply():
+        from server import interview_organizer
+        with closing(db()) as c:
+            state = interview.find(c, pid)
+            if state is not None and state['version'] == 2:
+                interview_organizer.schedule(c, pid)
     async def lines():
         try:
-            async with aclosing(turn_events(pid, turn, streaming=True, speak=turn.speak,
-                                            deferred_hash=deferred_hash)) as events:
-                async for event in events:
+            from server.turn_stream import events_with_progress
+            events = turn_events(pid, turn, streaming=True, speak=turn.speak, deferred_hash=deferred_hash)
+            async with aclosing(events_with_progress(events, turn.request_id)) as progress:
+                async for event in progress:
                     yield json.dumps(event, ensure_ascii=False) + '\n'
         except HTTPException as exc:
             yield json.dumps({'type': 'error', 'detail': exc.detail, 'status': exc.status_code}, ensure_ascii=False) + '\n'
 
-    return StreamingResponse(lines(), media_type='application/x-ndjson', headers={
+    return StreamingResponse(lines(), media_type='application/x-ndjson', background=BackgroundTask(organize_after_reply), headers={
         'X-Accel-Buffering': 'no', 'Cache-Control': 'no-store',
     })
 
@@ -810,7 +827,7 @@ async def turn_events(pid, turn, *, streaming=False, speak=False, deferred_hash=
                     raise HTTPException(409, '访谈已有新进度，请刷新后继续')
                 number = visit['question']
                 if (turn.interview_action == 'begin' and number != 0 or turn.interview_action in ('skip', 'next')
-                        and not 1 <= number <= len(interview.BANKS[visit['version']])):
+                        and not 1 <= number <= (30 if visit['version'] == 2 else len(interview.BANKS[visit['version']]))):
                     raise HTTPException(409, '当前没有可执行的访谈操作')
             if not existing:
                 mid = uuid.uuid4().hex
@@ -912,6 +929,10 @@ async def turn_events(pid, turn, *, streaming=False, speak=False, deferred_hash=
             if topic or visit:
                 c.execute('UPDATE books SET updated=CURRENT_TIMESTAMP WHERE id=?', (pid,))
             c.commit()
+        if visit and visit['version'] == 2 and not streaming:
+            from server import interview_organizer
+            with closing(db()) as c:
+                interview_organizer.schedule(c, pid)
         yield {'type': 'done', 'user_id': mid, 'assistant_id': aid, 'text': response, **progress}
 
 
