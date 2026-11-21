@@ -1,6 +1,7 @@
 """Single-conversation entry point and reviewable whole-book drafts."""
 
 import asyncio
+import hashlib
 import json
 import uuid
 from contextlib import closing
@@ -8,7 +9,8 @@ from contextlib import closing
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from server import book_store as books, interview
+from server import book_store as books, interview, interview_v2
+from server.interview_themes import THEMES
 from server.interview_questions import BANKS, SUPPLEMENT
 
 router = APIRouter(prefix='/api/books/{bid}/interview')
@@ -49,6 +51,7 @@ def pending(c, bid):
 
 
 def draft_material(c, bid):
+    state = interview.find(c, bid)
     answers = interview.answers_for(c, bid)
     refs = {}
     for number, mid, quote in interview.available_excerpts(c, interview.find(c, bid), answers):
@@ -70,7 +73,9 @@ def draft_material(c, bid):
             selected.setdefault(containing, set()).update(passages[quote])
         for quote, numbers in selected.items():
             size += len(quote) + len(question or '') + 100
-            if material and size > 65_000:
+            # v2 groups complete themes below; a global cut could accidentally
+            # turn the final theme into a tiny chapter or omit its story ending.
+            if state['version'] != 2 and material and size > 65_000:
                 return material
             material.append({
                 'message': row['id'], 'quote': quote, 'numbers': sorted(numbers),
@@ -170,6 +175,35 @@ async def generate_chapters(material, bank, existing):
     return results
 
 
+async def generate_theme_chapters(material, existing):
+    """One completed hidden theme is one chapter; the model only titles/writes it."""
+    groups = {}
+    for passage in material:
+        if len(passage['numbers']) != 1:
+            raise HTTPException(502, '主题素材归属不明确，请重试')
+        groups.setdefault(passage['numbers'][0], []).append(passage)
+    proposals = []
+    for number, passages in sorted(groups.items()):
+        old = next((row for row in existing.values() if json.loads(row['questions']) == [number]), None)
+        raw = await backend.llm(CHAPTER_PROMPT +
+            '本次所有素材属于同一章，不拆章、不合入其他章。另输出 title，标题从实际故事细节提炼。',
+            json.dumps({'purpose': THEMES[number - 1].value,
+                        'existing': old['excerpt'] if old else '',
+                        'passages': [{k: p[k] for k in ('quote', 'asked')} for p in passages]},
+                       ensure_ascii=False), json_mode=True, max_tokens=8192, thinking=False)
+        result = interview.decode(raw, 'AI 正文格式有误，请重试')
+        body, title = result.get('body'), old['title'] if old else result.get('title')
+        if (not isinstance(body, str) or not body.strip() or len(body) > 100_000
+                or not isinstance(title, str) or not title.strip() or len(title) > 100):
+            raise HTTPException(502, 'AI 章节内容有误，请重试')
+        proposals.append({'title': title.strip(), 'body': body.strip(), 'questions': [number],
+                          'append_to': old['id'] if old else None,
+                          'base_revision': old['revision'] if old else None,
+                          'sources': list(dict.fromkeys(p['message'] for p in passages)),
+                          'passages': [(p['message'], p['quote']) for p in passages]})
+    return proposals
+
+
 @router.post('/draft')
 async def make_draft(bid: str, request: Request):
     backend.require(request)
@@ -182,7 +216,8 @@ async def make_draft(bid: str, request: Request):
         existing = existing_chapters(c, bid)
     if not material:
         raise HTTPException(409, '暂时没有尚未整理的访谈素材')
-    proposals = await generate_chapters(material, (*BANKS[state['version']], SUPPLEMENT), existing)
+    proposals = (await generate_theme_chapters(material, existing) if state['version'] == 2 else
+                 await generate_chapters(material, (*BANKS[state['version']], SUPPLEMENT), existing))
     with closing(backend.db()) as c, c:
         c.execute('BEGIN IMMEDIATE')
         latest = require_interview(c, bid)
@@ -263,7 +298,8 @@ def save_draft(bid: str, did: str, data: DraftEdit, request: Request):
             raise HTTPException(409, '访谈已有新进度，请重新整理草稿')
         if len(proposals) != len(data.chapters):
             raise HTTPException(400, '草稿章节数不一致')
-        withheld = interview.withheld_recordings(interview.answers_for(c, bid))
+        withheld = (interview_v2.withheld_recordings(c, bid) if state['version'] == 2 else
+                    interview.withheld_recordings(interview.answers_for(c, bid)))
         chapter_ids = [adopt(c, bid, proposal, edit, withheld) for proposal, edit in zip(proposals, data.chapters)]
         c.execute('UPDATE interview_drafts SET saved=1,chapters=? WHERE id=?', (json.dumps(chapter_ids), did))
         c.execute('UPDATE books SET updated=CURRENT_TIMESTAMP WHERE id=?', (bid,))
@@ -278,6 +314,52 @@ def discard_draft(bid: str, did: str, request: Request):
         require_interview(c, bid)
         c.execute('DELETE FROM interview_drafts WHERE book_id=? AND id=? AND saved=0', (bid, did))
         return {'ok': True}
+
+
+class RefreshInput(BaseModel):
+    text: str = Field(min_length=1, max_length=100_000)
+    revision: int = Field(ge=0)
+    request_id: str = Field(pattern=r'^[0-9a-f]{32}$')
+
+
+@router.post('/messages/{mid}/refresh')
+async def refresh_question(bid: str, mid: str, data: RefreshInput, request: Request):
+    backend.require(request)
+    fingerprint = hashlib.sha256(json.dumps({'mid': mid, **data.model_dump()}, sort_keys=True).encode()).hexdigest()
+    key = f'{backend.ACCOUNT.get()}:{bid}'
+    lock = backend._turn_locks.setdefault(key, asyncio.Lock())
+    async with lock:
+        with closing(backend.db()) as c:
+            books.active(c, bid)
+            state = require_interview(c, bid)
+            if state['version'] != 2:
+                raise HTTPException(409, '这本书使用原有访谈方式')
+            previous = c.execute('SELECT * FROM interview_v2_refreshes WHERE book_id=? AND request_id=?',
+                                 (bid, data.request_id)).fetchone()
+            if previous:
+                if previous['fingerprint'] != fingerprint:
+                    raise HTTPException(409, '请求编号已用于其他操作')
+                return json.loads(previous['response'])
+            current = interview_v2.latest_question(c, state)
+            if (state['revision'] != data.revision or current is None
+                    or current['id'] != mid or current['text'] != data.text):
+                raise HTTPException(409, '访谈已有新进度，请刷新后继续')
+            text, updates = await interview_v2.refresh(c, state, backend.llm)
+        with closing(backend.db()) as c, c:
+            c.execute('BEGIN IMMEDIATE')
+            books.active(c, bid)
+            latest = require_interview(c, bid)
+            current = interview_v2.latest_question(c, latest)
+            if latest['revision'] != data.revision or current is None or current['id'] != mid or current['text'] != data.text:
+                raise HTTPException(409, '访谈已有新进度，请刷新后继续')
+            # Keep the displayed original independently of the overwritten bubble.
+            c.execute('INSERT OR IGNORE INTO interview_v2_prompts VALUES(?,?,?)', (bid, mid, data.text))
+            c.execute('UPDATE messages SET text=? WHERE id=?', (text, mid))
+            progress = interview_v2.commit(c, latest, mid, latest['question'], 0, updates)
+            result = {'id': mid, 'text': text, 'interview': progress}
+            c.execute('INSERT INTO interview_v2_refreshes VALUES(?,?,?,?)',
+                      (bid, data.request_id, fingerprint, json.dumps(result, ensure_ascii=False)))
+            return result
 
 
 from server import app as backend, book_api

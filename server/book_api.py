@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 from server import book_store as books, chapter_sharing, chat_sessions, interview
 from server.book_topics import TEMPLATES
 from server.interview_questions import CURRENT_VERSION
+from server import interview_v2
 from server.memory_vectors import VectorIndex
 
 router = APIRouter(prefix='/api/books')
@@ -27,6 +28,7 @@ class BookInput(BookMetadata):
     name: str = Field(min_length=1, max_length=100)
     template_id: str = 'life'
     interview: bool = False
+    interview_version: int | None = Field(default=None, ge=1, le=2)
 
 
 def state(c):
@@ -37,7 +39,7 @@ def state(c):
     by_id = {row['id']: row for row in rows}
     for row in rows:
         row.update(chapter_count=0, completed_topic_count=0, character_count=0,
-                   interview_version=CURRENT_VERSION)
+                   interview_version=interview_v2.version(c, row['id']))
     for chapter in c.execute('''SELECT ch.person_id,ch.content,
         EXISTS(SELECT 1 FROM book_topics t WHERE t.book_id=ch.person_id AND t.chapter_id=ch.id) AS linked
         FROM chapters ch JOIN books b ON b.id=ch.person_id
@@ -51,7 +53,8 @@ def state(c):
         row['character_count'] += count
         row['completed_topic_count'] += chapter['linked']
     active = c.execute('SELECT active_id FROM book_state').fetchone()[0]
-    return {'active_id': active, 'interview_version': CURRENT_VERSION, 'books': [r for r in rows if r['deleted_at'] is None],
+    return {'active_id': active, 'interview_version': CURRENT_VERSION, 'interview_versions': [1, 2],
+            'books': [r for r in rows if r['deleted_at'] is None],
             'trash': [r for r in rows if r['deleted_at'] is not None],
             'retired_ids': [row[0] for row in c.execute('SELECT id FROM retired_books')]}
 
@@ -93,11 +96,21 @@ def create(data: BookInput, request: Request):
             if tuple(existing) != (title, name, author, data.template_id):
                 raise HTTPException(409, '这个创建请求已用于另一本书')
             bid = data.id
+            if data.interview_version is not None and interview_v2.version(c, bid) != data.interview_version:
+                raise HTTPException(409, '这本书的访谈方式已经固定，请新建书籍')
         else:
             if data.id and c.execute('SELECT 1 FROM retired_books WHERE id=?', (data.id,)).fetchone():
                 raise HTTPException(410, '原书已到期清理，请重新填写')
             bid = books.create(c, title, name, author, data.id, data.template_id,
                                seed_topics=not data.interview)
+            if data.interview_version is not None and not data.interview:
+                raise HTTPException(400, '请使用访谈方式创建书籍')
+            interview_v2.ensure_schema(c)
+            c.execute('INSERT INTO book_interview_versions VALUES(?,?)',
+                      (bid, data.interview_version or 1))
+            if data.interview_version == 2:
+                # Pin and shuffle at creation, not on whichever device first opens it.
+                interview.start(c, bid)
         return {'id': bid, **state(c)}
 
 
