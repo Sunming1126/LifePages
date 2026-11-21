@@ -1478,7 +1478,7 @@ class _FreeChatPageState extends State<FreeChatPage>
         }
         if (reply != null) break;
       }
-      if (reply == null) throw Exception('AI 回复未完成，请点击重试。');
+      if (reply == null) throw Exception('AI 回复未完成，内容已保留，请点击重试。');
       if (widget.interview && _turnSession(turn) == _session) {
         _readInterview(reply['interview']);
       }

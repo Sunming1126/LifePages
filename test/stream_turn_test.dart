@@ -67,4 +67,37 @@ void main() {
       unawaited(data.close());
     }
   });
+
+  test(
+    'a transport failure after a heartbeat preserves the retry hint',
+    () async {
+      final data = StreamController<List<int>>();
+      final api = Api(client: StreamClient(data.stream));
+      final response = api.streamTurn(
+        '/api/people/fictional/turns',
+        {},
+        speak: false,
+      );
+
+      final assertion = expectLater(
+        response,
+        emitsInOrder([
+          {'type': 'processing'},
+          emitsError(
+            isA<ApiFailure>().having(
+              (e) => e.message,
+              'message',
+              '回复连接中断，内容已保留，请点击重试。',
+            ),
+          ),
+          emitsDone,
+        ]),
+      );
+
+      data.add(utf8.encode('{"type":"processing"}\n'));
+      data.addError(http.ClientException('Connection reset'));
+      await data.close();
+      await assertion;
+    },
+  );
 }

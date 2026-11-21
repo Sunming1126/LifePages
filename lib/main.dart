@@ -191,36 +191,37 @@ class Api {
     final request = http.Request('POST', Uri.parse('$base$path/stream'))
       ..headers.addAll(headers)
       ..body = jsonEncode({...body, 'speak': speak});
-    final response = await _client
-        .send(request)
-        .timeout(
-          const Duration(seconds: 50),
-          onTimeout: () => throw const ApiFailure(504, '回复连接超时，内容已保留，请点击重试。'),
-        );
-    if (response.statusCode != 200) {
-      final buffered = await http.Response.fromStream(
-        response,
-      ).timeout(const Duration(seconds: 15));
-      // A client installed before its server is upgraded can still send turns.
-      if (response.statusCode == 404 && path.endsWith('/turns')) {
-        final reply = await call('POST', path, body) as Map;
-        yield {'type': 'done', ...Map<String, dynamic>.from(reply)};
+    const interrupted = ApiFailure(504, '回复连接中断，内容已保留，请点击重试。');
+    try {
+      final response = await _client
+          .send(request)
+          .timeout(const Duration(seconds: 50));
+      if (response.statusCode != 200) {
+        final buffered = await http.Response.fromStream(
+          response,
+        ).timeout(const Duration(seconds: 15));
+        // A client installed before its server is upgraded can still send turns.
+        if (response.statusCode == 404 && path.endsWith('/turns')) {
+          final reply = await call('POST', path, body) as Map;
+          yield {'type': 'done', ...Map<String, dynamic>.from(reply)};
+          return;
+        }
+        _responseData(buffered);
         return;
       }
-      _responseData(buffered);
-      return;
-    }
-    await for (final line
-        in response.stream
-            .transform(utf8.decoder)
-            .transform(const LineSplitter())
-            .timeout(
-              turnIdleTimeout,
-              onTimeout: (sink) {
-                sink.addError(const ApiFailure(504, '回复连接中断，内容已保留，请点击重试。'));
-              },
-            )) {
-      if (line.isNotEmpty) yield jsonDecode(line) as Map<String, dynamic>;
+      await for (final line
+          in response.stream
+              .transform(utf8.decoder)
+              .transform(const LineSplitter())
+              .timeout(turnIdleTimeout)) {
+        if (line.isNotEmpty) yield jsonDecode(line) as Map<String, dynamic>;
+      }
+    } on TimeoutException {
+      throw const ApiFailure(504, '回复连接超时，内容已保留，请点击重试。');
+    } on http.ClientException {
+      throw interrupted;
+    } on SocketException {
+      throw interrupted;
     }
   }
 
