@@ -61,6 +61,8 @@ core 按主题两个核心条件提供原话证据。story_unit 仅在至少一�
 旧证据由程序保留；用户更正、撤回或明确排除时，用 withdrawn 选择需撤回的旧片段ID，涉及的旧准则也要重新判。
 已充分回答而尚未展示的精选题，放入 covered:[{"id":"题目ID","evidence":["片段ID"]}]；只有真正充分才覆盖。
 ack 是对刚讲内容的简短自然回应，可作换问题的过渡；不虚构人物、经历、感受或因果。
+若当前故事已收束且质量充分，参照 next_chapter_question 写一句自然承接的 ack，系统会紧接着原样展示该问题。
+有事实关联才承接；没有关联就简短回应后换话题，不硬编联系，不宣布主题或题号，不等待或提及后台整理。
 new_question 是同主题另一个未讲过的故事入口，供精选题耗尽时用；不是当前追问的改写。
 entry 是新入口的简短语义标识，不能与 shown 中已用的入口相同。
 不得主动引向亲人离世或创伤；不预设婚姻、子女、学历、正式职业。劳动也包括务农、家务、零工和照料。
@@ -344,7 +346,7 @@ async def generate_followup(context, shown, llm):
     request = {'history': context.get('history', []),
                'avoid_questions': [q['text'] for q in shown[-16:]]}
     for _ in range(2):
-        result = interview.decode(await llm(prompt, json.dumps(request, ensure_ascii=False), json_mode=True),
+        result = interview.decode(await llm(prompt, json.dumps(request, ensure_ascii=False), json_mode=True, max_tokens=1024, thinking=False),
                                   'AI 未能生成具体追问，请重试')
         candidates = result.get('questions', [])
         if not isinstance(candidates, list):
@@ -548,7 +550,12 @@ async def respond(c, state, mid, text, action, llm):
         question = await next_question(entry, theme, source, llm)
         return '好，我们换个角度。\n' + question, number, 0, updates
     passages = passage_table(entry, source, mid)
-    context = {'theme': theme_context(theme), 'passages': passages,
+    upcoming = None
+    if number < len(THEMES):
+        next_entry = document['themes'][THEMES[number].id]
+        used = {q['id'] for q in next_entry['shown']} | set(next_entry['covered'])
+        upcoming = next((QUESTIONS[qid].prompt for qid in next_entry['order'] if qid not in used), None)
+    context = {'theme': theme_context(theme), 'passages': passages, 'next_chapter_question': upcoming,
         'current_question': entry['current'], 'current_criteria': (
         [vars(cell) for cell in QUESTIONS[entry['current']].criteria] if entry['current'] in QUESTIONS
         else [{'dimension': label, 'sufficient': f'围绕当前新问题“{entry["shown"][-1]["text"]}”，'

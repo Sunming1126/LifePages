@@ -107,7 +107,7 @@ class InterviewTests(unittest.IsolatedAsyncioTestCase):
             payload.update(interview_action=action, interview_revision=self.revision)
         path = f'/api/people/{self.bid}/turns'
 
-        async def output(_, context, *, json_mode):
+        async def output(_, context, *, json_mode, **kwargs):
             self.assertTrue(json_mode)
             data = json.loads(context)
             return json.dumps(model(data), ensure_ascii=False)

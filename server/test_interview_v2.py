@@ -367,6 +367,35 @@ class ThemeFlowTest(unittest.IsolatedAsyncioTestCase):
                 chapters = (await self.client.get(f'/api/books/{self.bid}/chapters')).json()
                 self.assertEqual(len(chapters), int(length >= 30))
 
+    async def test_next_chapter_reply_finishes_while_organizer_is_blocked(self):
+        await self.begin()
+        self.auto.stop()
+        started, release = asyncio.Event(), asyncio.Event()
+        async def slow_chapter(material, existing):
+            started.set()
+            await release.wait()
+            return []
+        captured = {}
+        def assessment(data):
+            captured['next_question'] = data['next_chapter_question']
+            assessed = result(data, full=True)
+            assessed['ack'] = '这段经历里的细节已经记下了。'
+            return assessed
+        from server import interview_api
+        with patch.object(interview_api, 'generate_theme_chapters', side_effect=slow_chapter):
+            reply = await asyncio.wait_for(self.turn(''.join(chr(0x4e00 + i) for i in range(330)),
+                assessment, streaming=True), timeout=1)
+            self.assertEqual(reply['interview']['question'], 2)
+            self.assertEqual(reply['interview']['characters'], 0)
+            self.assertTrue(reply['text'].startswith('这段经历里的细节已经记下了。'))
+            self.assertTrue(reply['text'].endswith(captured['next_question']))
+            await asyncio.wait_for(started.wait(), timeout=1)
+            self.assertFalse(release.is_set())
+            task = interview_organizer._tasks[(backend.ACCOUNT.get(), self.bid)]
+            task.cancel()
+            release.set()
+            await asyncio.gather(task, return_exceptions=True)
+
     async def test_background_schedule_deduplicates_and_editor_observes_completion(self):
         await self.begin()
         await self.turn(''.join(chr(0x4e00 + i) for i in range(330)), lambda d: result(d, full=True))
