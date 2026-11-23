@@ -10,6 +10,7 @@ import 'package:record/record.dart';
 import 'package:uuid/uuid.dart';
 
 import 'chat_sheet.dart';
+import 'directory_page.dart';
 import 'platform_capabilities.dart';
 import 'main.dart'
     show
@@ -35,6 +36,11 @@ String chapterImagePath(String bookId, String topicId, String imageId) =>
 
 Future<String> loadChapterImage(Api client, String path) async =>
     (await client.call('GET', path))['data'] as String;
+
+class EmptyBookDirectory implements Exception {
+  @override
+  String toString() => '目录已移除，可在管理目录中恢复或添加。';
+}
 
 class ChapterOpening {
   const ChapterOpening._(
@@ -75,6 +81,7 @@ class ChapterOpening {
     final data = await client.call('GET', '$path?$query') as Map;
     final topics = _readRows(data['topics']);
     if (topics.isEmpty) {
+      if (!interview) throw EmptyBookDirectory();
       throw StateError('请先在访谈中整理并保存书稿');
     }
     final initial =
@@ -123,6 +130,7 @@ class ChapterEditor extends StatefulWidget {
     required this.client,
     this.author,
     this.onChaptersChanged,
+    this.onDirectoryChanged,
     this.documentsDirectory,
     this.voiceCapture,
     this.initialOpening,
@@ -136,6 +144,7 @@ class ChapterEditor extends StatefulWidget {
   final Api client;
   final bool interview;
   final VoidCallback? onChaptersChanged;
+  final VoidCallback? onDirectoryChanged;
   final Future<Directory> Function()? documentsDirectory;
   final VoiceCapture? voiceCapture;
   final ChapterOpening? initialOpening;
@@ -157,6 +166,7 @@ class _ChapterEditorState extends State<ChapterEditor>
   String? _selected, _loadError;
   Timer? _organizationPoll;
   bool _organizing = false;
+  bool _emptyDirectory = false;
   String? _insertId, _insertFingerprint;
   Object? _saveError;
   bool _working = false, _dirty = false, _saving = false;
@@ -279,6 +289,7 @@ class _ChapterEditorState extends State<ChapterEditor>
       setState(() {
         _working = true;
         _loadError = null;
+        _emptyDirectory = false;
       });
     }
     try {
@@ -323,7 +334,20 @@ class _ChapterEditorState extends State<ChapterEditor>
         }
       }
     } catch (error) {
-      if (mounted && cold) setState(() => _loadError = errorText(error));
+      if (mounted && error is EmptyBookDirectory && !_dirty) {
+        setState(() {
+          _topic = null;
+          _blocks = [];
+          _selected = null;
+          _emptyDirectory = true;
+          _loadError = null;
+        });
+      } else if (mounted && cold) {
+        setState(() {
+          _emptyDirectory = error is EmptyBookDirectory;
+          _loadError = _emptyDirectory ? null : errorText(error);
+        });
+      }
     } finally {
       if (mounted && cold) setState(() => _working = false);
     }
@@ -745,18 +769,45 @@ class _ChapterEditorState extends State<ChapterEditor>
     widget.onChaptersChanged?.call();
   });
 
-  Future<void> _organize() => _work(() async {
-    if (!await _flush() || !mounted) return;
-    final updated = await _withProgress(
-      _EditorAction.draft,
-      () => _client.call('POST', '$_topicPath/organize', {
-        'revision': _topic!['revision'],
-      }),
+  Future<void> _manageDirectory() => _work(() async {
+    if (_topic != null && !await _flush() || !mounted) return;
+    await Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => DirectoryPage(
+          bookId: widget.bookId,
+          title: widget.title,
+          client: widget.client,
+          onChanged: () {
+            widget.onDirectoryChanged?.call();
+            widget.onChaptersChanged?.call();
+          },
+        ),
+      ),
     );
     if (!mounted) return;
-    _applyTopic(_Row.from(updated as Map), null);
-    widget.onChaptersChanged?.call();
+    setState(() {
+      _topic = null;
+      _blocks = [];
+      _selected = null;
+    });
+    await _load();
   });
+
+  Future<void> _organize() {
+    if (!widget.interview && _topic?['has_narrations'] == true) return _draft();
+    return _work(() async {
+      if (!await _flush() || !mounted) return;
+      final updated = await _withProgress(
+        _EditorAction.draft,
+        () => _client.call('POST', '$_topicPath/organize', {
+          'revision': _topic!['revision'],
+        }),
+      );
+      if (!mounted) return;
+      _applyTopic(_Row.from(updated as Map), null);
+      widget.onChaptersChanged?.call();
+    });
+  }
 
   Future<void> _aiText() => _work(() async {
     final request = await showChatSheet<String>(
@@ -1140,6 +1191,12 @@ class _ChapterEditorState extends State<ChapterEditor>
                 : () {},
           ),
           actions: [
+            if (!widget.interview)
+              IconButton(
+                tooltip: '管理目录',
+                onPressed: enabled ? _manageDirectory : null,
+                icon: const Icon(Icons.playlist_add_check),
+              ),
             TextButton.icon(
               onPressed: topic == null || !enabled ? null : _preview,
               icon: const Icon(Icons.menu_book_outlined, size: 20),
@@ -1148,12 +1205,24 @@ class _ChapterEditorState extends State<ChapterEditor>
             ),
           ],
         ),
-        bottomNavigationBar: keyboard || (topic == null && _loadError != null)
+        bottomNavigationBar:
+            keyboard || _emptyDirectory || (topic == null && _loadError != null)
             ? null
             : _toolbar(topic != null && enabled),
         body: topic == null
             ? Center(
-                child: _loadError == null
+                child: _emptyDirectory
+                    ? Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          const Text('还没有目录，先添加一章吧。'),
+                          TextButton(
+                            onPressed: enabled ? _manageDirectory : null,
+                            child: const Text('管理目录'),
+                          ),
+                        ],
+                      )
+                    : _loadError == null
                     ? const _OpeningPlaceholder()
                     : Column(
                         mainAxisSize: MainAxisSize.min,

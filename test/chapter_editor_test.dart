@@ -39,6 +39,7 @@ class ManuscriptApi extends Api {
   int manuscriptReads = 0;
   Completer<void>? suggestionGate;
   bool offline = false;
+  bool emptyDirectory = false;
   bool organizing = false;
 
   @override
@@ -74,6 +75,9 @@ class ManuscriptApi extends Api {
       ];
     }
     if (uri.path.endsWith('/topics')) {
+      if (method == 'GET' && emptyDirectory) {
+        return {'active_id': null, 'topics': []};
+      }
       if (method == 'POST') {
         expect(body!['generate_question'], isTrue);
         final id = body['id'] as String;
@@ -153,6 +157,43 @@ Future<void> flushEditor(WidgetTester tester) async {
 }
 
 void main() {
+  testWidgets(
+    'cached directory chapter is cleared when all directories were removed',
+    (tester) async {
+      FlutterSecureStorage.setMockInitialValues({});
+      final dir = Directory.systemTemp.createTempSync(
+        'lifepages-empty-directory-',
+      );
+      addTearDown(() => dir.deleteSync(recursive: true));
+      final client = ManuscriptApi(hasBody: true);
+      final opening = await tester.runAsync(
+        () => ChapterOpening.load(
+          client,
+          'book',
+          documentsDirectory: () async => dir,
+        ),
+      );
+      client.emptyDirectory = true;
+      await tester.pumpWidget(
+        MaterialApp(
+          home: ChapterEditor(
+            name: '测试',
+            bookId: 'book',
+            title: '虚构书',
+            client: client,
+            initialOpening: opening,
+            documentsDirectory: () async => dir,
+          ),
+        ),
+      );
+      await flushEditor(tester);
+      expect(find.text('还没有目录，先添加一章吧。'), findsOneWidget);
+      expect(find.text('AI 整理的正文。'), findsNothing);
+      expect(find.text('管理目录'), findsOneWidget);
+      await tester.pumpWidget(const SizedBox.shrink());
+    },
+  );
+
   testWidgets(
     'automatic chapter appears in directory without reopening editor',
     (tester) async {

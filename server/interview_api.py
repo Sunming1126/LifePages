@@ -23,6 +23,9 @@ async def open_interview(bid: str, request: Request):
         book_api.initialize(c)
         c.execute('BEGIN IMMEDIATE')
         books.active(c, bid)
+        from server import book_modes
+        if book_modes.mode(c, bid) == 'directory':
+            raise HTTPException(409, '这本书使用目录模式，请选择一个章节开始')
         state = interview.start(c, bid)
         sid = state['session_id']
         c.execute('UPDATE book_state SET active_id=? WHERE singleton=1', (bid,))

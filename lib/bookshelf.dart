@@ -5,12 +5,17 @@ import 'package:flutter/material.dart';
 
 import 'book_cover.dart';
 import 'chapter_editor.dart';
+import 'directory_page.dart';
 import 'chat_sheet.dart';
 import 'main.dart' show Api, BookPage, ChapterPage, errorText;
 
 typedef BookRecord = Map<String, dynamic>;
 
-enum _BookAction { rename, preview, delete }
+bool isCompanionBook(BookRecord book) => book['book_mode'] == null
+    ? book['interview_version'] != null
+    : book['book_mode'] == 'companion';
+
+enum _BookAction { rename, preview, directory, delete }
 
 const _bookAccent = Color(0xff836332);
 
@@ -19,12 +24,40 @@ Future<BookRecord?> newBookSheet(
   Api client, {
   bool interview = false,
   int interviewVersion = 1,
+  bool allowModes = false,
 }) async {
+  var companion = interview;
+  if (allowModes) {
+    final chosen = await showChatSheet<String>(
+      context: context,
+      builder: (sheet) => Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const ListTile(title: Text('选择创作方式')),
+          ListTile(
+            leading: const Icon(Icons.list_alt),
+            title: const Text('目录模式'),
+            subtitle: const Text('按目录聊故事，自由管理章节和预设问题。'),
+            onTap: () => Navigator.pop(sheet, 'directory'),
+          ),
+          ListTile(
+            leading: const Icon(Icons.chat_bubble_outline),
+            title: const Text('陪伴模式'),
+            subtitle: const Text('自然聊天，AI 在后台整理成章。'),
+            onTap: () => Navigator.pop(sheet, 'companion'),
+          ),
+        ],
+      ),
+    );
+    if (chosen == null || !context.mounted) return null;
+    companion = chosen == 'companion';
+  }
   final form = GlobalKey<FormState>();
   final data = <String, dynamic>{
-    if (interview) ...{
+    if (allowModes) 'book_mode': companion ? 'companion' : 'directory',
+    if (companion) ...{
       'interview': true,
-      if (interviewVersion == 2) 'interview_version': 2,
+      if (allowModes || interviewVersion == 2) 'interview_version': 2,
     } else
       'template_id': 'life',
   };
@@ -52,7 +85,7 @@ Future<BookRecord?> newBookSheet(
                       ? '请填写${field.value}'
                       : null,
                 ),
-              if (!interview)
+              if (!companion)
                 ListTile(
                   contentPadding: EdgeInsets.zero,
                   leading: const Icon(Icons.view_list_outlined),
@@ -257,11 +290,9 @@ class _BookshelfState extends State<Bookshelf> {
               widget.client,
               id,
               documentsDirectory: widget.documentsDirectory,
-              interview:
-                  widget.books.firstWhere(
-                    (book) => book['id'] == id,
-                  )['interview_version'] !=
-                  null,
+              interview: isCompanionBook(
+                widget.books.firstWhere((book) => book['id'] == id),
+              ),
             )
             .then((opening) {
               if (mounted &&
@@ -280,7 +311,7 @@ class _BookshelfState extends State<Bookshelf> {
 
   Future<void> _openEditor(BuildContext context, BookRecord book) async {
     final id = book['id'] as String;
-    final interview = book['interview_version'] != null;
+    final interview = isCompanionBook(book);
     await Navigator.of(context).push(
       PageRouteBuilder<void>(
         transitionDuration: Duration.zero,
@@ -299,6 +330,10 @@ class _BookshelfState extends State<Bookshelf> {
             if (mounted && _hasBook(id)) _rememberOpening(id, opening);
           },
           onChaptersChanged: () => widget.onChaptersChanged(id),
+          onDirectoryChanged: () {
+            _openings.remove(id);
+            _requests.remove(id);
+          },
         ),
       ),
     );
@@ -315,7 +350,7 @@ class _BookshelfState extends State<Bookshelf> {
           title: book['title'] as String,
           author: book['author'] as String,
           client: widget.client,
-          interview: book['interview_version'] != null,
+          interview: isCompanionBook(book),
           onChaptersChanged: () => widget.onChaptersChanged(id),
         ),
       ),
@@ -333,6 +368,12 @@ class _BookshelfState extends State<Bookshelf> {
             title: const Text('修改书名和作者'),
             onTap: () => Navigator.pop(sheet, _BookAction.rename),
           ),
+          if (book['book_mode'] == 'directory')
+            ListTile(
+              leading: const Icon(Icons.format_list_numbered),
+              title: const Text('管理目录'),
+              onTap: () => Navigator.pop(sheet, _BookAction.directory),
+            ),
           ListTile(
             leading: const Icon(Icons.auto_stories_outlined),
             title: const Text('预览全书'),
@@ -357,6 +398,21 @@ class _BookshelfState extends State<Bookshelf> {
           builder: (_) => _RenameBookSheet(
             book: book,
             onSave: (data) => widget.onRename(book['id'] as String, data),
+          ),
+        );
+      case _BookAction.directory:
+        Navigator.of(context).push(
+          MaterialPageRoute<void>(
+            builder: (_) => DirectoryPage(
+              bookId: book['id'] as String,
+              title: book['title'] as String,
+              client: widget.client,
+              onChanged: () {
+                _openings.remove(book['id']);
+                _requests.remove(book['id']);
+                widget.onChaptersChanged(book['id'] as String);
+              },
+            ),
           ),
         );
       case _BookAction.preview:
@@ -436,7 +492,7 @@ class _BookshelfState extends State<Bookshelf> {
     final completed = book['completed_topic_count'] as int?;
     final characters = book['character_count'] as int?;
     final current = book['id'] == widget.activeId;
-    final interview = book['interview_version'] != null;
+    final interview = isCompanionBook(book);
     return Card(
       color: const Color(0xfffffdfa),
       elevation: 0,
@@ -502,6 +558,11 @@ class _BookshelfState extends State<Bookshelf> {
                         maxLines: 2,
                         overflow: TextOverflow.ellipsis,
                       ),
+                      if (book['book_mode'] != null)
+                        Text(
+                          interview ? '陪伴模式' : '目录模式',
+                          style: Theme.of(context).textTheme.bodySmall,
+                        ),
                       const SizedBox(height: 12),
                       if (!interview)
                         ClipRRect(

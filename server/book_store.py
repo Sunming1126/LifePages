@@ -76,6 +76,9 @@ def topic(c, bid, tid):
     row = c.execute('SELECT * FROM book_topics WHERE id=? AND book_id=?', (tid, bid)).fetchone()
     if row is None:
         raise HTTPException(404, '找不到本书的这个章节')
+    from server import book_modes
+    if book_modes.archived(c, tid):
+        raise HTTPException(410, '这个目录已移入最近删除，可在管理目录中恢复')
     return row
 
 

@@ -58,6 +58,7 @@ class _ChatShellState extends State<ChatShell> {
   bool _loading = true, _busy = false;
   bool _interviewAvailable = false;
   bool _themeInterviewAvailable = false;
+  bool _bookModesAvailable = false;
   int _tab = 0, _shelfEpoch = 0;
   PageBackground _background = PageBackground.paperTone;
   bool _backgroundChosen = false;
@@ -100,6 +101,8 @@ class _ChatShellState extends State<ChatShell> {
   }
 
   void _applyRecords(dynamic state) {
+    _bookModesAvailable =
+        (state['book_modes'] as List?)?.contains('directory') == true;
     _interviewAvailable = state['interview_version'] != null;
     _themeInterviewAvailable =
         (state['interview_versions'] as List?)?.contains(2) == true;
@@ -239,6 +242,7 @@ class _ChatShellState extends State<ChatShell> {
       context,
       _api,
       interview: _interviewAvailable,
+      allowModes: _bookModesAvailable,
       interviewVersion: _themeInterviewAvailable ? 2 : 1,
     );
     if (mounted && data != null) {
@@ -471,7 +475,8 @@ class _ChatShellState extends State<ChatShell> {
                         key: _chatKey,
                         personId: book['id'] as String,
                         bookTitle: book['title'] as String,
-                        interview: book['interview_version'] != null,
+                        interview: isCompanionBook(book),
+                        companion: _bookModesAvailable && isCompanionBook(book),
                         bookDrafts: _drafts.putIfAbsent(
                           book['id'] as String,
                           () => {},
@@ -661,8 +666,12 @@ class FreeChatPage extends StatefulWidget {
     this.client,
     this.documentsDirectory,
     this.interview = false,
+    this.companion = false,
+    this.clock,
   });
   final bool interview;
+  final bool companion;
+  final DateTime Function()? clock;
   @override
   State<FreeChatPage> createState() => _FreeChatPageState();
 }
@@ -684,6 +693,11 @@ class _FreeChatPageState extends State<FreeChatPage>
   int _replyEpoch = 0;
   bool _allowReplyAudioPrompt = false;
   bool _foreground = true;
+  bool _awayMarked = false, _checkingReturn = false;
+  Future<void> _awayWrite = Future.value();
+  DateTime get _now => widget.clock?.call() ?? DateTime.now();
+  String get _awayKey =>
+      'companion-away-${sha256.convert(utf8.encode("${chatApi.base}\u0000${chatApi.token}"))}';
   VoiceCapture get recorder =>
       _recorder ??= widget.voiceCapture ?? DeviceVoiceCapture();
   Api get chatApi => widget.client ?? api;
@@ -874,6 +888,7 @@ class _FreeChatPageState extends State<FreeChatPage>
       if (pointerDown) unawaited(finishVoice(cancel: true));
     }
     if (!oldWidget.active && widget.active) {
+      unawaited(_checkReturn());
       unawaited(_preconnectReplyAudio());
       unawaited(_syncOriginals());
       WidgetsBinding.instance.addPostFrameCallback((_) => _sendQueuedVoice());
@@ -894,9 +909,95 @@ class _FreeChatPageState extends State<FreeChatPage>
     setState(() => textMode = false);
   }
 
+  Future<void> _rememberAway() async {
+    final stamp = jsonEncode({
+      'book_id': widget.personId,
+      'left_at': _now.millisecondsSinceEpoch ~/ 1000,
+      'request_id': const Uuid().v4().replaceAll('-', ''),
+      'last_user_id': messages
+          .where((m) => m['role'] == 'user')
+          .lastOrNull?['id'],
+    });
+    final key = _awayKey;
+    _awayWrite = _awayWrite
+        .then(
+          (_) => widget.companion
+              ? secure.write(key: key, value: stamp)
+              : secure.delete(key: key),
+        )
+        .catchError((Object _) {});
+    await _awayWrite;
+  }
+
+  Future<void> _checkReturn() async {
+    if (_checkingReturn || !mounted || !_foreground) return;
+    final lifecycle = WidgetsBinding.instance.lifecycleState;
+    if (lifecycle != null && lifecycle != AppLifecycleState.resumed) return;
+    _checkingReturn = true;
+    final key = _awayKey;
+    try {
+      await _awayWrite;
+      final raw = await secure.read(key: key);
+      if (raw == null) return;
+      final stamp = jsonDecode(raw) as Map;
+      final left = stamp['left_at'] as int;
+      final elapsed = _now.millisecondsSinceEpoch ~/ 1000 - left;
+      if (!widget.companion ||
+          stamp['book_id'] != widget.personId ||
+          elapsed < 3600) {
+        if (await secure.read(key: key) == raw) await secure.delete(key: key);
+        return;
+      }
+      if (!widget.active ||
+          loading ||
+          !_canSend ||
+          input.text.trim().isNotEmpty ||
+          _sessionOutbox.isNotEmpty ||
+          !await hasAiConsent(widget.personId)) {
+        return;
+      }
+      final result = await chatApi.call('POST', '$_interviewPath/resume', {
+        'request_id': stamp['request_id'],
+        'left_at': left,
+        'last_user_id': stamp['last_user_id'],
+      });
+      if (await secure.read(key: key) == raw) await secure.delete(key: key);
+      if (!mounted ||
+          !_foreground ||
+          !widget.active ||
+          _chatBusy ||
+          _sessionOutbox.isNotEmpty) {
+        return;
+      }
+      setState(() {
+        _chapterHistory[_session] = List<dynamic>.from(
+          result['messages'] as List,
+        );
+        _readInterview(result['interview']);
+      });
+      unawaited(_saveOpening());
+      scrollToEnd();
+    } catch (_) {
+      // Keep the same return request ID for a safe retry; never interrupt ordinary chat.
+    } finally {
+      _checkingReturn = false;
+    }
+  }
+
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     _foreground = state == AppLifecycleState.resumed;
+    if ((state == AppLifecycleState.paused ||
+            state == AppLifecycleState.hidden ||
+            state == AppLifecycleState.detached) &&
+        !_awayMarked) {
+      _awayMarked = true;
+      unawaited(_rememberAway());
+    }
+    if (_foreground) {
+      _awayMarked = false;
+      unawaited(_checkReturn());
+    }
     if (!_foreground) {
       unawaited(_stopReply());
       _releaseReplyRoom();
@@ -1122,7 +1223,17 @@ class _FreeChatPageState extends State<FreeChatPage>
           : await chatApi.call('GET', _topicsPath);
       if (!mounted) return;
       _deferredVoice = state['deferred_voice_upload'] == true;
-      final sid = state['active_id'] as String;
+      final sid = state['active_id'] as String?;
+      if (sid == null && !widget.interview) {
+        setState(() {
+          _topicUpdates.value = _decodeTopics(state);
+          _sessionId = null;
+          _offline = false;
+          _topicLoadError = null;
+        });
+        return;
+      }
+      if (sid == null) throw Exception('聊天进度尚未准备好');
       final loaded = widget.interview
           ? List<dynamic>.from(state['messages'] as List)
           : await _activateTopic(sid);
@@ -1160,6 +1271,7 @@ class _FreeChatPageState extends State<FreeChatPage>
         unawaited(_queueOriginal(turn));
       }
       _sendQueuedVoice();
+      unawaited(_checkReturn());
     }
   }
 
@@ -2379,7 +2491,17 @@ class _FreeChatPageState extends State<FreeChatPage>
     final state = await chatApi
         .call('GET', _topicsPath)
         .timeout(const Duration(seconds: 15));
-    if (mounted) setState(() => _topicUpdates.value = _decodeTopics(state));
+    if (!mounted) return;
+    setState(() => _topicUpdates.value = _decodeTopics(state));
+    if (!_topics.any((row) => row['id'] == _sessionId)) {
+      if (_topics.isEmpty) {
+        setState(() => _sessionId = null);
+      } else {
+        await _switchTopic(
+          state['active_id'] as String? ?? _topics.first['id'] as String,
+        );
+      }
+    }
   }
 
   Future<void> _reviewDraft() async {
@@ -2787,6 +2909,15 @@ class _FreeChatPageState extends State<FreeChatPage>
                                     ),
                                   ],
                                 )
+                              : !widget.interview
+                              ? IconButton(
+                                  key: const ValueKey(
+                                    'chapter-directory-button',
+                                  ),
+                                  tooltip: '章节目录',
+                                  onPressed: _chatBusy ? null : _openTopics,
+                                  icon: const Icon(Icons.menu_rounded),
+                                )
                               : null,
                         ),
                         Expanded(
@@ -2887,13 +3018,15 @@ class _FreeChatPageState extends State<FreeChatPage>
                             localTurns.isEmpty &&
                             !awaitingReply &&
                             !_chapterLoadFailed
-                      ? const Center(
+                      ? Center(
                           child: Padding(
-                            padding: EdgeInsets.fromLTRB(32, 24, 32, 54),
+                            padding: const EdgeInsets.fromLTRB(32, 24, 32, 54),
                             child: Text(
-                              '有什么我能帮你的吗？',
+                              !widget.interview && _topics.isEmpty
+                                  ? '还没有目录，请先到书架添加一章。'
+                                  : '有什么我能帮你的吗？',
                               textAlign: TextAlign.center,
-                              style: TextStyle(
+                              style: const TextStyle(
                                 fontSize: 30,
                                 fontWeight: FontWeight.w700,
                               ),

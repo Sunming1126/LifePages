@@ -4,7 +4,7 @@ import re
 import time
 import uuid
 from contextlib import closing
-from typing import Optional
+from typing import Optional, Literal
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
@@ -27,25 +27,28 @@ class BookInput(BookMetadata):
     id: Optional[str] = Field(default=None, pattern=r'^[0-9a-f]{32}$')
     name: str = Field(min_length=1, max_length=100)
     template_id: str = 'life'
+    book_mode: Literal['directory', 'companion'] | None = None
     interview: bool = False
     interview_version: int | None = Field(default=None, ge=1, le=2)
 
 
 def state(c):
+    from server import book_modes
     rows = [dict(row) for row in c.execute('''SELECT b.*,p.name,COALESCE(t.topic_count,0) AS topic_count
         FROM books b JOIN people p ON p.id=b.id LEFT JOIN
-        (SELECT book_id,COUNT(*) AS topic_count FROM book_topics GROUP BY book_id) t ON t.book_id=b.id
+        (SELECT book_id,COUNT(*) AS topic_count FROM book_topics WHERE NOT EXISTS(SELECT 1 FROM book_topic_archives a WHERE a.topic_id=book_topics.id) GROUP BY book_id) t ON t.book_id=b.id
         ORDER BY b.updated DESC,b.rowid DESC''')]
     by_id = {row['id']: row for row in rows}
     for row in rows:
+        row['book_mode'] = book_modes.mode(c, row['id'])
         row.update(chapter_count=0, completed_topic_count=0, character_count=0,
-                   interview_version=interview_v2.version(c, row['id']))
+                   interview_version=interview_v2.version(c, row['id']) if row['book_mode'] == 'companion' else None)
     for chapter in c.execute('''SELECT ch.person_id,ch.content,
         EXISTS(SELECT 1 FROM book_topics t WHERE t.book_id=ch.person_id AND t.chapter_id=ch.id) AS linked
         FROM chapters ch JOIN books b ON b.id=ch.person_id
         LEFT JOIN book_topics t ON t.chapter_id=ch.id
         LEFT JOIN topic_manuscripts m ON m.topic_id=t.id
-        WHERE TRIM(ch.content)!='' OR COALESCE(m.image_count,0)>0
+        WHERE (TRIM(ch.content)!='' OR COALESCE(m.image_count,0)>0) AND NOT EXISTS(SELECT 1 FROM book_topic_archives a WHERE a.topic_id=t.id)
         '''):
         count = sum(map(len, chapter['content'].split()))
         row = by_id[chapter['person_id']]
@@ -53,7 +56,7 @@ def state(c):
         row['character_count'] += count
         row['completed_topic_count'] += chapter['linked']
     active = c.execute('SELECT active_id FROM book_state').fetchone()[0]
-    return {'active_id': active, 'interview_version': CURRENT_VERSION, 'interview_versions': [1, 2],
+    return {'book_modes': ['directory', 'companion'], 'active_id': active, 'interview_version': CURRENT_VERSION, 'interview_versions': [1, 2],
             'books': [r for r in rows if r['deleted_at'] is None],
             'trash': [r for r in rows if r['deleted_at'] is not None],
             'retired_ids': [row[0] for row in c.execute('SELECT id FROM retired_books')]}
@@ -67,6 +70,8 @@ def initialize(c):
     if not c.execute("SELECT 1 FROM sqlite_master WHERE name='topic_images'").fetchone():
         books.ensure_editor(c)
         c.commit()
+    from server import book_modes
+    book_modes.ensure_schema(c)
 
 
 @router.get('')
@@ -81,6 +86,11 @@ def shelf(request: Request):
 @router.post('')
 def create(data: BookInput, request: Request):
     backend.require(request)
+    if data.book_mode is not None:
+        if data.book_mode == 'directory':
+            data.interview, data.interview_version = False, None
+        else:
+            data.interview, data.interview_version = True, 2
     title, name, author = (value.strip() for value in (data.title, data.name, data.author))
     if not all((title, name, author)):
         raise HTTPException(400, '请填写书名、称呼和作者')
@@ -96,6 +106,9 @@ def create(data: BookInput, request: Request):
             if tuple(existing) != (title, name, author, data.template_id):
                 raise HTTPException(409, '这个创建请求已用于另一本书')
             bid = data.id
+            from server import book_modes
+            if data.book_mode is not None and book_modes.mode(c, bid) != data.book_mode:
+                raise HTTPException(409, '这本书的创作模式已固定，请新建书籍')
             if data.interview_version is not None and interview_v2.version(c, bid) != data.interview_version:
                 raise HTTPException(409, '这本书的访谈方式已经固定，请新建书籍')
         else:
@@ -108,6 +121,8 @@ def create(data: BookInput, request: Request):
             interview_v2.ensure_schema(c)
             c.execute('INSERT INTO book_interview_versions VALUES(?,?)',
                       (bid, data.interview_version or 1))
+            if data.book_mode is not None:
+                c.execute('INSERT INTO book_modes VALUES(?,?)', (bid, data.book_mode))
             if data.interview_version == 2:
                 # Pin and shuffle at creation, not on whichever device first opens it.
                 interview.start(c, bid)
@@ -177,7 +192,7 @@ async def topics(bid: str, request: Request, editor: bool = False,
         rows = [dict(row) for row in c.execute('''SELECT t.id,t.number,t.theme,t.title,t.question,ch.content,d.id AS draft_id,
             t.chapter_id FROM book_topics t LEFT JOIN chapters ch ON ch.id=t.chapter_id
             LEFT JOIN topic_drafts d ON d.topic_id=t.id
-            WHERE t.book_id=? AND (NOT ? OR t.chapter_id IS NOT NULL OR d.id IS NOT NULL
+            WHERE t.book_id=? AND NOT EXISTS(SELECT 1 FROM book_topic_archives a WHERE a.topic_id=t.id) AND (NOT ? OR t.chapter_id IS NOT NULL OR d.id IS NOT NULL
             OR EXISTS(SELECT 1 FROM topic_insertions i WHERE i.topic_id=t.id)
             OR EXISTS(SELECT 1 FROM topic_manuscripts m WHERE m.topic_id=t.id))
             ORDER BY t.number''', (bid, interview_only))]
@@ -228,7 +243,7 @@ def chapter_list(bid: str, request: Request, include_material: bool = False, int
             EXISTS(SELECT 1 FROM chapter_audio WHERE chapter_id=ch.id) AS has_audio
             FROM chapters ch LEFT JOIN book_topics t ON t.chapter_id=ch.id
             LEFT JOIN topic_manuscripts m ON m.topic_id=t.id
-            WHERE ch.person_id=? AND (TRIM(ch.content)!='' OR COALESCE(m.image_count,0)>0)
+            WHERE ch.person_id=? AND NOT EXISTS(SELECT 1 FROM book_topic_archives a WHERE a.topic_id=t.id) AND (TRIM(ch.content)!='' OR COALESCE(m.image_count,0)>0)
             ORDER BY t.number IS NULL,t.number,ch.position,ch.rowid''', (bid,))]
         for chapter in chapters:
             blocks = chapter.pop('blocks')

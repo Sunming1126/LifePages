@@ -276,7 +276,7 @@ def requested_action(text):
     last = clauses[-1]
     if last in REFUSALS:
         return 'skip', len(clauses) == 1
-    if NEXT.fullmatch(last):
+    if NEXT.fullmatch(last) or re.fullmatch(r'(?:我想|想|我们|咱们|请)?(?:换个新话题|换个话题|开始新话题|开始新的话题|开始一个新话题|开始一个新的话题|新的话题|新话题)(?:吧|了)?', last):
         return 'next', len(clauses) == 1
     return None, False
 

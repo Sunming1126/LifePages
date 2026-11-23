@@ -1294,6 +1294,10 @@ from server import account_profile, email_auth, email_password, firebase_auth
 
 init_registry()
 
+from server.book_modes import router as directory_router
+from server.companion_resume import router as companion_resume_router
+app.include_router(companion_resume_router)
+app.include_router(directory_router)
 app.include_router(book_router)
 app.include_router(manuscript_router)
 app.include_router(interview_router)

@@ -128,6 +128,9 @@ async def insert(bid: str, data: InsertTopic, request: Request):
             c.execute('INSERT INTO topic_insertions VALUES(?,?,?,?)', (data.id, *fingerprint[1:]))
             c.execute('''UPDATE chapters SET position=(SELECT number FROM book_topics WHERE chapter_id=chapters.id)
                 WHERE id IN (SELECT chapter_id FROM book_topics WHERE book_id=? AND number>?)''', (bid, position))
+            from server import book_modes
+            if book_modes.mode(c, bid) == 'directory':
+                book_modes.advance(c, bid)
             return {'id': data.id}
 
 
@@ -154,6 +157,9 @@ def edit_topic(bid: str, tid: str, data: EditTopic, request: Request):
             c.execute('UPDATE chat_sessions SET title=? WHERE id=?', (title, tid))
             if topic['chapter_id']:
                 c.execute('UPDATE chapters SET title=? WHERE id=?', (title, topic['chapter_id']))
+            from server import book_modes
+            if book_modes.mode(c, bid) == 'directory':
+                book_modes.advance(c, bid)
         return books.manuscript_snapshot(c, books.topic(c, bid, tid))
 
 
@@ -314,5 +320,8 @@ async def organize(bid: str, tid: str, data: OrganizeInput, request: Request):
         c.execute('UPDATE chapters SET title=?,content=? WHERE id=?', (title, body, topic['chapter_id']))
         c.execute('UPDATE book_topics SET title=?,revision=revision+1 WHERE id=?', (title, tid))
         c.execute('UPDATE chat_sessions SET title=? WHERE id=?', (title, tid))
+        from server import book_modes
+        if book_modes.mode(c, bid) == 'directory':
+            book_modes.advance(c, bid)
         c.execute('UPDATE books SET updated=CURRENT_TIMESTAMP WHERE id=?', (bid,))
         return books.manuscript_snapshot(c, books.topic(c, bid, tid))
