@@ -43,3 +43,11 @@
 安卓端应合入本任务共享提交，保留 android 分支自身 7dd521e 的传输错误可读性修复与原生配置；本次未触及 lib/main.dart，避免覆盖其该项修复。不得替换整套 iOS 工作目录或自动合并 main。
 
 最终验证命令：`flutter analyze --no-pub`、`flutter test --no-pub --concurrency=1`（75 项）、`/opt/anaconda3/bin/python3 -B -m unittest discover -s server`（106 项）；实际 iOS 目录 `flutter build ios --simulator --debug --no-codesign --no-pub` 通过。未启动任何模拟器。
+
+## 2026-11-24 编辑页入口简化
+
+本次共享范围仅 `lib/chapter_editor.dart` 与 `test/chapter_editor_test.dart`。目录模式将独立改名、在本章后添加章节两个旧按钮替换为带文字的“管理目录”入口，和书架入口进入同一页面，统一修改章节名/预设问题、增删、恢复和排序。编辑页已加载章节时不再在顶栏重复显示管理入口，空目录仍可进入管理。陪伴模式的原编辑操作保留。
+
+正文头部删除后台分类小字，只显示章节名字和问题。实际 iOS 目录的这两份文件经与修改前基线逐字节比对后同步，未覆盖其他工作；共享实现没有平台分流，测试覆盖 iOS 和 Android 两种组件变体。无后端、配置或数据库变更，不需重新部署后端。未启动模拟器，安卓/iOS 设备交互待用户验证；未合并 main 或推送安卓分支。
+
+本次验证：`flutter analyze --no-pub` 无问题；`flutter test --no-pub --concurrency=1 --reporter expanded` 完整 77 项通过。未重复构建或运行 iOS/Android 设备。

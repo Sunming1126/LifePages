@@ -57,6 +57,9 @@ class ManuscriptApi extends Api {
       );
       return {'text': '保留原话的意思'};
     }
+    if (uri.path.endsWith('/directory')) {
+      return {'revision': 0, 'topics': rows.values.toList(), 'archived': []};
+    }
     if (uri.path.endsWith('/chapters')) {
       return [
         for (final row in rows.values)
@@ -317,25 +320,25 @@ void main() {
           await tester.pumpAndSettle();
           await tester.tap(find.text('第 1 章 · 故乡'));
           await flushEditor(tester);
-          await tester.tap(find.byTooltip('添加章节'));
+          expect(find.byTooltip('添加章节'), findsNothing);
+          expect(find.byTooltip('编辑章节'), findsNothing);
+          expect(find.text('管理目录'), findsOneWidget);
+          expect(find.text('回忆'), findsNothing);
+          expect(find.text('故乡'), findsOneWidget);
+          expect(find.text('您还记得什么？'), findsOneWidget);
+          await tester.tap(find.text('管理目录'));
           await tester.pumpAndSettle();
-          await tester.enterText(find.byType(TextFormField).first, '新章节');
-          await tester.tap(find.text('保存'));
+          expect(find.text('管理目录'), findsOneWidget);
+          expect(find.byTooltip('添加目录'), findsOneWidget);
+          await tester.tap(find.byType(BackButton));
           await flushEditor(tester);
-          expect(find.text('第 2 章 · 新章节'), findsOneWidget);
-          expect(find.text('您最想从这段经历的哪一幕说起？'), findsOneWidget);
-          expect(client.rows['b']!['number'], 3);
-          await tester.tap(find.byTooltip('编辑章节'));
-          await tester.pumpAndSettle();
-          expect(find.byType(TextFormField), findsOneWidget);
-          await tester.enterText(find.byType(TextFormField), '改名后的章节');
-          await tester.tap(find.text('保存'));
-          await flushEditor(tester);
-          expect(find.text('第 2 章 · 改名后的章节'), findsOneWidget);
-          expect(find.text('您最想从这段经历的哪一幕说起？'), findsOneWidget);
+          expect(find.text('第 1 章 · 故乡'), findsOneWidget);
         }
       },
-      variant: TargetPlatformVariant.only(TargetPlatform.iOS),
+      variant: TargetPlatformVariant({
+        TargetPlatform.iOS,
+        TargetPlatform.android,
+      }),
     );
   }
 

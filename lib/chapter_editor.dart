@@ -1103,11 +1103,6 @@ class _ChapterEditorState extends State<ChapterEditor>
     final header = <Widget>[
       if (topic != null) ...[
         Text(
-          topic['theme'] as String,
-          style: const TextStyle(color: _gold, fontWeight: FontWeight.bold),
-        ),
-        const SizedBox(height: 8),
-        Text(
           topic['title'] as String,
           style: const TextStyle(fontSize: 29, fontWeight: FontWeight.bold),
         ),
@@ -1191,7 +1186,7 @@ class _ChapterEditorState extends State<ChapterEditor>
                 : () {},
           ),
           actions: [
-            if (!widget.interview)
+            if (!widget.interview && topic == null && !_emptyDirectory)
               IconButton(
                 tooltip: '管理目录',
                 onPressed: enabled ? _manageDirectory : null,
@@ -1254,26 +1249,37 @@ class _ChapterEditorState extends State<ChapterEditor>
                               ),
                             ),
                           ),
-                          IconButton(
-                            tooltip: '编辑章节',
-                            onPressed: enabled
-                                ? () => _chapterMetadata(insert: false)
-                                : null,
-                            icon: _actionIcon(
-                              _EditorAction.rename,
-                              Icons.edit_outlined,
+                          if (!widget.interview)
+                            TextButton.icon(
+                              onPressed: enabled ? _manageDirectory : null,
+                              icon: const Icon(
+                                Icons.playlist_add_check,
+                                size: 20,
+                              ),
+                              label: const Text('管理目录'),
+                            )
+                          else ...[
+                            IconButton(
+                              tooltip: '编辑章节',
+                              onPressed: enabled
+                                  ? () => _chapterMetadata(insert: false)
+                                  : null,
+                              icon: _actionIcon(
+                                _EditorAction.rename,
+                                Icons.edit_outlined,
+                              ),
                             ),
-                          ),
-                          IconButton(
-                            tooltip: '添加章节',
-                            onPressed: enabled
-                                ? () => _chapterMetadata(insert: true)
-                                : null,
-                            icon: _actionIcon(
-                              _EditorAction.insert,
-                              Icons.playlist_add_rounded,
+                            IconButton(
+                              tooltip: '添加章节',
+                              onPressed: enabled
+                                  ? () => _chapterMetadata(insert: true)
+                                  : null,
+                              icon: _actionIcon(
+                                _EditorAction.insert,
+                                Icons.playlist_add_rounded,
+                              ),
                             ),
-                          ),
+                          ],
                         ],
                       ),
                     ),
