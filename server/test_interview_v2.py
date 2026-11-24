@@ -20,7 +20,8 @@ def result(data, *, full=False, worthwhile=False, story_open=False, followup='�
             'core': [evidence, evidence] if full else [[], []], 'story_unit': evidence if full else [],
             'covered': list(covered), 'story_open': story_open, 'followup_worthwhile': worthwhile,
             'followup': followup, 'ack': '这段经历我记下了。',
-            'new_question': '在附近过日子时，您还记得哪次亲手帮忙张罗的事？', 'entry': '附近帮忙张罗'}
+            'new_question': '在附近过日子时，您还记得哪次亲手帮忙张罗的事？', 'entry': '附近帮忙张罗',
+            'next_chapter_reply': {'ack': '这段经历我记下了。', 'question': data.get('next_chapter_question')}}
 
 
 class CurriculumTest(unittest.TestCase):
@@ -85,6 +86,15 @@ class ThemeFlowTest(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.auto = patch.object(interview_organizer, 'schedule', return_value={'organizing': False})
         self.auto.start()
+        original_llm = backend.llm
+        async def transition_model(system, context, **kwargs):
+            if system != interview_v2.TRANSITION_PROMPT:
+                return await original_llm(system, context, **kwargs)
+            data = json.loads(context)
+            return json.dumps({'ack': '我们从您熟悉的另一段生活说起。', 'question': data['selected_question']})
+        self.transitions = patch.object(backend, 'llm', side_effect=transition_model)
+        self.transitions.start()
+        self.addCleanup(self.transitions.stop)
         self.addCleanup(self.auto.stop)
         self.client = httpx.AsyncClient(transport=httpx.ASGITransport(app=backend.app), base_url='http://test')
         self.token = (await self.client.post('/api/bootstrap')).json()['token']
@@ -109,6 +119,8 @@ class ThemeFlowTest(unittest.IsolatedAsyncioTestCase):
     async def turn(self, text, factory=None, action=None, *, streaming=False, audio=None, followup_factory=None):
         async def model(system, context, **kwargs):
             data = json.loads(context)
+            if 'transition' in data:
+                return json.dumps({'ack': '我们从您熟悉的另一段生活说起。', 'question': data['selected_question']})
             if 'avoid_questions' in data:
                 return json.dumps(followup_factory(data) if followup_factory else
                     {'questions': ['那天您亲手做的哪一步最难？']}, ensure_ascii=False)
@@ -275,6 +287,55 @@ class ThemeFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(historical.status_code, 409)
         self.assertEqual(answered['interview']['refresh_message_id'], answered['assistant_id'])
 
+    async def test_refresh_uses_user_context_and_preserves_preset_identity(self):
+        await self.begin()
+        story = '小时候我常在村口看爷爷摆摊卖豆腐。'
+        latest = await self.turn(story, lambda d: result(d, worthwhile=True))
+        before = self.document()['themes']['t01']
+        captured = {}
+        async def compose(system, context, **kwargs):
+            captured.update(json.loads(context))
+            return json.dumps({'ack': '您记得爷爷在村口摆豆腐摊的日子。',
+                               'question': captured['selected_question']})
+        with patch.object(backend, 'llm', side_effect=compose):
+            refreshed, _ = await self.refresh(latest)
+        self.assertEqual(refreshed.status_code, 200, refreshed.text)
+        self.assertEqual(captured['transition'], 'refresh')
+        self.assertTrue(any(row['text'] == story for row in captured['history']))
+        self.assertFalse(any(row['text'] == latest['text'] for row in captured['history']))
+        after = self.document()['themes']['t01']
+        self.assertEqual(after['material'], before['material'])
+        self.assertEqual(after['order'], before['order'])
+        self.assertEqual(QUESTIONS[after['shown'][-1]['id']].prompt, captured['selected_question'])
+        self.assertEqual(after['shown'][-1]['text'], refreshed.json()['text'].splitlines()[-1])
+        self.assertIn('爷爷在村口', refreshed.json()['text'])
+        # Even with curated questions left, generation failure commits nothing.
+        snapshot = self.document()
+        current = {'assistant_id': latest['assistant_id'], 'text': refreshed.json()['text']}
+        with patch.object(backend, 'llm', AsyncMock(return_value='{}')):
+            failed, _ = await self.refresh(current)
+        self.assertEqual(failed.status_code, 502)
+        self.assertEqual(self.document(), snapshot)
+
+    async def test_transition_rejects_model_changing_the_selected_entry(self):
+        await self.begin()
+        document = self.document()
+        selected = document['themes']['t01']['shown'][-1]['text']
+        prefix = '我们从另一段熟悉的生活说起。'
+        model = AsyncMock(side_effect=[
+            json.dumps({'ack': prefix, 'question': '那次您又是怎么做豆腐的？'}),
+            json.dumps({'ack': prefix, 'question': selected}),
+        ])
+        reply = await interview_v2.transition_reply(document, 1, selected, [], model, reason='refresh')
+        self.assertEqual(reply, prefix + '\n' + selected)
+        self.assertEqual(model.await_count, 2)
+        # A valid transition from the assessment is reused without another call.
+        model.reset_mock()
+        reused = await interview_v2.transition_reply(document, 1, selected, [], model,
+            reason='next_theme', proposed={'ack': prefix, 'question': selected})
+        self.assertEqual(reused, reply)
+        model.assert_not_awaited()
+
     async def test_curated_pool_never_wraps_and_failure_consumes_nothing(self):
         current = await self.begin()
         observed = {current['text'].splitlines()[-1]}
@@ -291,6 +352,7 @@ class ThemeFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(failed.status_code, 502)
         self.assertEqual(self.document(), before)
         with patch.object(backend, 'llm', AsyncMock(return_value=json.dumps({
+                'ack': '您说起的地方已经记下了。',
                 'question': '在附近过日子时，您还记得哪次帮忙张罗的事？', 'entry': '帮忙张罗'}))):
             extra, _ = await self.refresh(current)
         self.assertEqual(extra.status_code, 200, extra.text)
@@ -379,7 +441,8 @@ class ThemeFlowTest(unittest.IsolatedAsyncioTestCase):
         def assessment(data):
             captured['next_question'] = data['next_chapter_question']
             assessed = result(data, full=True)
-            assessed['ack'] = '这段经历里的细节已经记下了。'
+            assessed['next_chapter_reply'] = {'ack': '这段经历里的细节已经记下了。',
+                'question': data['next_chapter_question']}
             return assessed
         from server import interview_api
         with patch.object(interview_api, 'generate_theme_chapters', side_effect=slow_chapter):
@@ -389,6 +452,9 @@ class ThemeFlowTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(reply['interview']['characters'], 0)
             self.assertTrue(reply['text'].startswith('这段经历里的细节已经记下了。'))
             self.assertTrue(reply['text'].endswith(captured['next_question']))
+            shown = self.document()['themes']['t02']['shown'][-1]
+            self.assertEqual(QUESTIONS[shown['id']].prompt, captured['next_question'])
+            self.assertEqual(shown['text'], reply['text'].splitlines()[-1])
             await asyncio.wait_for(started.wait(), timeout=1)
             self.assertFalse(release.is_set())
             task = interview_organizer._tasks[(backend.ACCOUNT.get(), self.bid)]

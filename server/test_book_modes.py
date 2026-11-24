@@ -163,12 +163,14 @@ class ModeTests(unittest.IsolatedAsyncioTestCase):
         sid = opened['active_id']
         await self.client.post(f'/api/people/{bid}/turns', json={'request_id': uuid.uuid4().hex,
             'session_id': sid, 'text': '开始访谈', 'interview_action': 'begin', 'interview_revision': opened['interview']['revision']})
-        with patch.object(backend, 'llm', AsyncMock()) as model:
+        async def transition(system, context, **kwargs):
+            return json.dumps({'ack': '我们从另一段熟悉的生活说起。', 'question': json.loads(context)['selected_question']})
+        with patch.object(backend, 'llm', side_effect=transition) as model:
             moved = await self.client.post(f'/api/people/{bid}/turns', json={'request_id': uuid.uuid4().hex,
                 'session_id': sid, 'text': '开始一个新的话题'})
         self.assertEqual(moved.status_code, 200, moved.text)
         self.assertEqual(moved.json()['interview']['question'], 2)
-        model.assert_not_called()
+        model.assert_called_once()
         with patch.object(backend, 'llm', AsyncMock(return_value=json.dumps({'questions': ['小时候家里忙起来时，您会帮着做什么？']}))) as model:
             continued = await self.client.post(f'/api/people/{bid}/turns', json={'request_id': uuid.uuid4().hex,
                 'session_id': sid, 'text': '继续刚才的聊天'})
