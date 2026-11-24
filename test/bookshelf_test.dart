@@ -553,7 +553,9 @@ void main() {
       final yunzhou = find.byKey(const ValueKey('reply-voice-yunzhou'));
       await tester.tap(settings);
       await tester.pumpAndSettle();
-      expect(find.text('切换书籍'), findsOneWidget);
+      expect(find.text('聊天设置'), findsOneWidget);
+      expect(find.text('切换书籍'), findsNothing);
+      expect(find.text('我的回忆录'), findsNothing);
       expect(find.text('讲述者设置'), findsOneWidget);
       expect(vivi, findsNothing);
       expect(yunzhou, findsNothing);
@@ -573,10 +575,22 @@ void main() {
       await tester.tap(voiceMenu);
       await tester.pumpAndSettle();
       expect(tester.widget<ListTile>(yunzhou).selected, isTrue);
-      await tester.tap(find.byTooltip('返回切换书籍'));
+      await tester.tap(find.byTooltip('返回聊天设置'));
       await tester.pumpAndSettle();
-      expect(find.text('切换书籍'), findsOneWidget);
-      await tester.tap(find.text('我的回忆录'));
+      expect(find.text('聊天设置'), findsOneWidget);
+      expect(find.text('切换书籍'), findsNothing);
+      expect(find.text('我的回忆录'), findsNothing);
+      await tester.binding.handlePopRoute();
+      await tester.pumpAndSettle();
+      await tester.tap(shelfTab.first);
+      await settleShelf(tester);
+      final firstBook = find.ancestor(
+        of: find.text('我的回忆录').last,
+        matching: find.byType(Card),
+      );
+      await tester.tap(
+        find.descendant(of: firstBook, matching: find.text('继续聊天')),
+      );
       await settleShelf(tester);
       expect(client.active, 'first');
       await tester.tap(shelfTab.first);

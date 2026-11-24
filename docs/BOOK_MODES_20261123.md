@@ -51,3 +51,11 @@
 正文头部删除后台分类小字，只显示章节名字和问题。实际 iOS 目录的这两份文件经与修改前基线逐字节比对后同步，未覆盖其他工作；共享实现没有平台分流，测试覆盖 iOS 和 Android 两种组件变体。无后端、配置或数据库变更，不需重新部署后端。未启动模拟器，安卓/iOS 设备交互待用户验证；未合并 main 或推送安卓分支。
 
 本次验证：`flutter analyze --no-pub` 无问题；`flutter test --no-pub --concurrency=1 --reporter expanded` 完整 77 项通过。未重复构建或运行 iOS/Android 设备。
+
+## 2026-11-24 聊天设置不再切换书籍
+
+共享范围：`lib/chat_shell.dart`、`lib/bookshelf.dart`、`test/bookshelf_test.dart`。右上角仅保留讲述者与 AI 音色设置，删除书籍列表及选择书籍处理；目录模式书架卡片提供“继续聊天”，陪伴模式保留“继续访谈”，点击封面仍进入编辑页。书籍选择统一从书架进行，保留忙碌状态的切换保护。
+
+实际 iOS 目录按逐行差异及写入前哈希检查同步，保留该目录独有的首屏预加载和测试改动。没有改后端、账号、会员或原生配置，没有启动模拟器。陪伴模式的自由对话方案仍在讨论，本次未改访谈规则。
+
+本次 `flutter analyze --no-pub` 无问题，完整 `flutter test --no-pub --concurrency=1 --reporter expanded` 77 项通过，含原声、RTC 与一小时返回回归。未做设备交互验收。

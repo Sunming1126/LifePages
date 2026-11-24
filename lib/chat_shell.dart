@@ -269,7 +269,7 @@ class _ChatShellState extends State<ChatShell> {
     });
   }
 
-  Future<void> _chooseBook() async {
+  Future<void> _openChatSettings() async {
     if (!_canChangeBook) return;
     final currentVoice = await ReplyVoice.load();
     if (!mounted || !_canChangeBook) return;
@@ -284,7 +284,7 @@ class _ChatShellState extends State<ChatShell> {
                 children: [
                   ListTile(
                     leading: IconButton(
-                      tooltip: '返回切换书籍',
+                      tooltip: '返回聊天设置',
                       onPressed: () =>
                           setSheetState(() => pickingVoice = false),
                       icon: const Icon(Icons.arrow_back_rounded),
@@ -306,10 +306,10 @@ class _ChatShellState extends State<ChatShell> {
                 ],
               )
             : ListView(
-                key: const ValueKey('book-switcher-menu'),
+                key: const ValueKey('chat-settings-menu'),
                 shrinkWrap: true,
                 children: [
-                  const ListTile(title: Text('切换书籍')),
+                  const ListTile(title: Text('聊天设置')),
                   if (_book != null)
                     ListTile(
                       leading: const Icon(Icons.person_outline_rounded),
@@ -323,16 +323,6 @@ class _ChatShellState extends State<ChatShell> {
                     trailing: const Icon(Icons.chevron_right_rounded),
                     onTap: () => setSheetState(() => pickingVoice = true),
                   ),
-                  for (final book in _books)
-                    ListTile(
-                      leading: const Icon(Icons.auto_stories_outlined),
-                      title: Text(book['title'] as String),
-                      subtitle: Text(book['author'] as String),
-                      trailing: book['id'] == _activeId
-                          ? const Icon(Icons.check_rounded)
-                          : null,
-                      onTap: () => Navigator.pop(sheet, book['id']),
-                    ),
                 ],
               ),
       ),
@@ -368,8 +358,6 @@ class _ChatShellState extends State<ChatShell> {
       } catch (error) {
         if (mounted) showError(context, error);
       }
-    } else if (selection is String) {
-      _continue(selection);
     }
   }
 
@@ -481,7 +469,7 @@ class _ChatShellState extends State<ChatShell> {
                           book['id'] as String,
                           () => {},
                         ),
-                        onChooseBook: _chooseBook,
+                        onChooseBook: _openChatSettings,
                         client: _api,
                         documentsDirectory: widget.documentsDirectory,
                         active: _tab == 0,

@@ -583,12 +583,12 @@ class _BookshelfState extends State<Bookshelf> {
                             : '$completed/$total 章 · $characters 字',
                         style: Theme.of(context).textTheme.bodySmall,
                       ),
-                      if (interview && widget.onContinue != null)
+                      if (widget.onContinue != null)
                         TextButton(
                           onPressed: widget.busy
                               ? null
                               : () => widget.onContinue!(book['id'] as String),
-                          child: const Text('继续访谈'),
+                          child: Text(interview ? '继续访谈' : '继续聊天'),
                         ),
                       if (current) ...[
                         const SizedBox(height: 8),
