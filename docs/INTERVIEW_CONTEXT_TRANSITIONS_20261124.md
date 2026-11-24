@@ -32,4 +32,18 @@
 
 ## 上线状态
 
-本次只提交代码和验证记录，没有切换生产版本。需要部署后端后，iOS/Android 的现有陪伴聊天、刷新和换章请求才会使用新回复逻辑；不需要因为本次后端改动重新编译客户端。上线时应叠加到当前发布版，保留线上独有的提示词、启动预加载、账号和 RTC 优化，不用本地整套 server 直接覆盖线上。
+用户明确要求“部署”后，已于 2026-11-24 上线。iOS/Android 的现有陪伴聊天、刷新和换章请求均使用新回复逻辑；不需要因为本次后端改动重新编译客户端。本次以实际运行版本为底叠加访谈差异，保留线上独有的提示词、启动预加载、账号和 RTC 优化。
+
+## 生产部署记录
+
+- 功能提交：`5914773`，分支 `ios/book-modes-20261123`。本次未合并 main 或推送安卓分支。
+- 现版本：`/opt/lifepages/releases/20261124-context-transitions`。
+- 原版本：`/opt/lifepages/releases/20261124-book-modes-r3`。
+- 备份：`/opt/lifepages/backups/20261124-context-transitions`，含 SQLite 在线备份、保全基线及 `deployment.json`。
+- 结果：`DEPLOYMENT_OK`。28 个既有账户库的所有表结构与逐行数据、原始录音、配置及其他服务保全检查通过，无数据库结构修改。
+- 服务器候选 Python 3.10 运行 book_modes、book_manuscript、interview_v2、turn_stream 共 53 项通过；这与实现阶段本地完整 108 项回归分别记录。
+- 三轮隔离真实模型 HTTP 验收及一次公网验收通过，覆盖自动换章、上下文刷新、刷新幂等、手动换章、流式响应/心跳、原请求重试及后台成章。每轮只用独立临时账号和虚构故事，测试账号及分享索引已清理。
+- 公网样本首个流事件约 6.67 秒，仅代表一次虚构验收的观测，不作为速度承诺。
+- 配置与独立 RTC 服务未改动；仅切换并重启 LifePages 主 API，定时器恢复原状态。未启动模拟器或真机，设备听感仍待用户验收。
+- 需要回滚时只切回原代码，不用旧库覆盖用户新写入。保留原版本和备份，不自动清理。
+- 发布脚本为 `deploy/release_interview_transitions.py`，验收脚本为 `deploy/smoke_interview_transitions_release.py`；线上文件清单及哈希位于发布目录 `manifest.json`。本地完整发布日志保存在忽略目录 `artifacts/deploy-interview-transitions/release.log`。
